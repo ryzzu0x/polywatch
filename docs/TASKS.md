@@ -58,9 +58,9 @@
 - [ ] **T-011 · Data API client + `ingest_trades` idempoten** — M
   - Cursor per market, backoff, batch insert
   - *Selesai jika:* 20 market acak cocok ±2% dengan Data API; ingest ulang tanpa duplikat
-- [ ] **T-012 · Domain scoring (edge, ROI, shrinkage, filter MM)** — M
+- [x] **T-012 · Domain scoring (edge, ROI, shrinkage, filter MM)** — M
   - *Selesai jika:* unit test kasus "beli 0.90 menang 85% → edge negatif" & deteksi dua sisi lulus
-- [ ] **T-013 · `recompute_scores` setelah resolve** — S
+- [x] **T-013 · `recompute_scores` setelah resolve** — S
   - *Selesai jika:* wallet_stats terbarui ≤ 30 dtk setelah result tersimpan (integration test)
 
 ## M3 — Bot Telegram & Alert (F5)
@@ -127,3 +127,5 @@
 | 2026-11-08 | T-009 | Selesai | PolymarketPriceSource (crypto-price Chainlink) + BinancePriceSource (klines 1m) cadangan, use case record_result (poll 30s, timeout 15 mnt → notifikasi owner sekali per market, outcome dari outcomePrices, price_source selalu terisi, idempoten), TelegramNotifier; verifikasi runtime 50 sampel ditunda ke QA T-022 |
 | 2026-11-08 | T-005b | Selesai | Spike CLOB WS market channel: subscribe `{"assets_ids":[...],"type":"market"}` ok (PING/PONG); latency median ~81 ms / p90 ~85 ms / max 592 ms (49.422 event, 3 run 5,5 mnt); `last_trade_price` memuat tx_hash/price/size/side/timestamp TAPI TANPA alamat wallet → WS cukup untuk harga real-time & detector, wallet tetap lewat Data API/on-chain; close 1000 "all subscribed assets resolved" → reconnect wajib; ADR-004 diperbarui; laporan `docs/spikes/T-005b-websocket.md` |
 | 2026-11-08 | T-010 | Selesai | Domain agregasi Trade → Position: `apply_trade` (BUY tambah net+cost, SELL kurangi net tanpa ubah cost, tolak oversell via `OversellError`), `positions_from_trades` per (wallet, market_id), `realize` PnL (menang 1/kalah 0), `average_entry` berbobot size (dua sisi → net terbesar); 22 unit test baru (167 total) |
+| 2026-11-08 | T-012 | Selesai | ScoringPolicy injectable (min_sample/shrinkage_k/bobot edge-ROI/ambang), edge_shrunk & roi_shrunk = nilai×n/(n+k), score_wallet 0-100 di-clamp tanpa pembagian nol, aggregate_market+build_wallet_stats (rata-rata entry berbobot USDC, deteksi dua sisi ≥30% market → market maker skor 0); unit test kasus "beli 0.90 menang 85% → skor 0" lulus (24 test domain, 173 total hijau). Technical debt: helper agregasi posisi lokal di domain/scoring.py perlu disatukan dengan T-010 |
+| 2026-11-08 | T-013 | Selesai | Use case recompute_scores (recompute penuh dari seluruh market resolve, bukan inkremental) + WalletStatsRepository PostgreSQL ON CONFLICT (wallet) idempoten + TradeRepository bagian baca (wallets_for_market, resolved_trades_for_wallet via port baru append-only); integration test polywatch_test verifikasi win_rate/edge/roi/score/is_market_maker + idempoten 2× eksekusi hasil sama; insert_many/last_traded_at = scope T-011 |

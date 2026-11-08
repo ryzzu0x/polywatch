@@ -98,6 +98,21 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   di-skip otomatis bila env tidak ada.
 - `TEST_DATABASE_URL` di `.env.example` (placeholder password).
 
+## [Unreleased]
+
+### Added
+- **T-012** — Domain scoring wallet (ADR-003): `ScoringPolicy` injectable,
+  `edge_shrunk`/`roi_shrunk` (nilai × n/(n+k)), `score_wallet` 0-100 kombinasi
+  edge & ROI ter-shrink (di-clamp, tanpa pembagian nol), `aggregate_market` +
+  `build_wallet_stats` (rata-rata entry berbobot USDC, PnL, staked), filter
+  market maker (dua sisi ≥ 30% market → skor 0), `win_rate_confidence`.
+- **T-013** — Use case `recompute_scores`: hitung ulang statistik semua wallet
+  yang trade di market yang baru resolve dari **seluruh** market resolve;
+  `WalletStatsRepository` PostgreSQL (upsert `ON CONFLICT (wallet)`, `top`
+  exclude market maker, `get`); port baru `TradeRepository.resolved_trades_for_wallet`
+  + DTO `ResolvedTrade` (append-only, signature lama tidak berubah);
+  `SqlAlchemyTradeRepository` bagian baca (tulis = scope T-011).
+
 ## [0.1.0] - 2026-11-08
 
 ### Added

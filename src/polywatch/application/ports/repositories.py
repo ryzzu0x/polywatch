@@ -8,6 +8,7 @@ from typing import Protocol
 
 from polywatch.application.dto.market import PendingMarket
 from polywatch.application.dto.settings import WatchEntry
+from polywatch.application.dto.trade import ResolvedTrade
 from polywatch.domain.market import Market, MarketResult, MarketStatus, Timeframe
 from polywatch.domain.scoring import WalletStats
 from polywatch.domain.trade import Trade
@@ -49,6 +50,10 @@ class TradeRepository(Protocol):
     async def last_traded_at(self, market_id: int) -> datetime | None: ...
 
     async def wallets_for_market(self, market_id: int) -> Sequence[str]: ...
+
+    async def resolved_trades_for_wallet(self, wallet: str) -> Sequence[ResolvedTrade]:
+        """Semua trade wallet pada market yang sudah resolve + arah hasilnya."""
+        ...
 
 
 class WalletStatsRepository(Protocol):

@@ -6,12 +6,13 @@ from polywatch.application.dto.market import (
     PendingMarket,
 )
 from polywatch.application.dto.settings import WatchEntry
-from polywatch.application.dto.trade import TradeSnapshot
+from polywatch.application.dto.trade import ResolvedTrade, TradeSnapshot
 
 __all__ = [
     "MarketResultSnapshot",
     "MarketSnapshot",
     "PendingMarket",
+    "ResolvedTrade",
     "TradeSnapshot",
     "WatchEntry",
 ]
