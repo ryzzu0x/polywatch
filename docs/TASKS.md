@@ -29,7 +29,7 @@
 - [x] **T-004 · PostgreSQL lokal + Alembic + migrasi awal** — M
   - DB `polywatch_db`/`polywatch_test`, role `polywatch_app`, tabel sesuai ARCHITECTURE §4 (tanpa tabel v2)
   - *Selesai jika:* `alembic upgrade head` dan `downgrade base` berjalan bersih
-- [ ] **T-005 · Spike sumber data** — M
+- [x] **T-005 · Spike sumber data** — M
   - Data API: pagination/cursor, rate limit, latency trade → tersedia; field `proxyWallet`, sisi, outcome
   - Open/close price: bandingkan Chainlink vs sumber publik lain terhadap 50 resolusi resmi
   - *Selesai jika:* ADR-004 & ADR-005 ditulis dengan angka nyata
@@ -116,3 +116,4 @@
 | 2026-11-08 | T-002 | Selesai | Workflow CI `.github/workflows/ci.yml` (ruff, mypy, import-linter, pytest) |
 | 2026-11-08 | T-003 | Selesai | Runner heartbeat (port Clock, SIGINT/SIGTERM), composition root engine/session DB lazy, redaksi secret di logging JSON, CLI default menjalankan runner; 44 test hijau; branch `feature/m0-fondasi` |
 | 2026-11-08 | T-004 | Selesai | Role `polywatch_app` + DB lokal, model SQLAlchemy 2 async, Alembic (env baca Settings), migrasi awal 11 tabel MVP + index/unique §4; upgrade/downgrade/upgrade bersih; integration test via `TEST_DATABASE_URL` (auto-skip) |
+| 2026-11-08 | T-005 | Selesai | Spike: Data API v1 pensiun (410) → v2 `?condition=` cursor-only, latency trade median 164 s/p90 251 s; ADR-004 Diterima; ADR-005: Polymarket crypto-price (Chainlink) utama + Binance cadangan (41/48); laporan `docs/spikes/T-005-sumber-data.md` |

@@ -1,0 +1,20 @@
+{
+ "endpoint": "/markets?slug=...&closed=true",
+ "response_truncated": {
+  "slug": "btc-updown-5m-1794110400",
+  "question": "Bitcoin Up or Down - November 7, 11:00PM-11:05PM ET",
+  "conditionId": "0x5b6de30f06b74864fb66d1464f1a71ec883dab14415d1e69896889c9b3740ed0",
+  "clobTokenIds": "[\"22798572314924303751012276323563073863041915279869103020788023451812478400438\", \"105446704431325901772229507736853505709989966369727960462358089532128228670452\"]",
+  "outcomes": "[\"Up\", \"Down\"]",
+  "outcomePrices": "[\"1\", \"0\"]",
+  "startDate": "2026-11-07T04:09:12.629875Z",
+  "endDate": "2026-11-08T04:05:00Z",
+  "closed": true,
+  "umaResolutionStatus": "resolved",
+  "volume": "42.068629",
+  "liquidityClob": null,
+  "resolutionSource": "https://data.chain.link/streams/btc-usd-twap-60s-streams",
+  "active": true,
+  "enableOrderBook": true
+ }
+}

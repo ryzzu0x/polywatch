@@ -1,0 +1,11 @@
+{
+ "endpoint": "polymarket.com/api/crypto/crypto-price?symbol=btc&eventStartTime=<unix>",
+ "response": {
+  "openPrice": 75918.01,
+  "closePrice": 75920.97,
+  "timestamp": 1794111138125,
+  "completed": false,
+  "incomplete": true,
+  "cached": false
+ }
+}

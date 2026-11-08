@@ -1,0 +1,22 @@
+{
+ "endpoint": "/v2/trades?condition=<conditionId>&limit=1",
+ "pagination": {
+  "limit": 1,
+  "offset": 0,
+  "has_more": true,
+  "next_cursor": "eyJkYXRhIjp7InR5cGUiOiJ0cmFkZXMiLCJwYXJhbXMiOnsibCI6MSwidHMiOjE3OTQxMTA2NjQsInNxIjoiOTY5MzY4MDUwMDAzMDAyNTUwIiwiZCI6MX19LCJzaWciOiIyMjcyZjdjZTI2YTI4YzllNGViNTUwODE3ZjZkZjFkMSJ9"
+ },
+ "trade_truncated": {
+  "proxy_wallet": "0x36b0e328d74bbf2c6982998c0805a45b1be4d968",
+  "side": "BUY",
+  "token_id": "36230358429272155489635603315577925135896328369541727565354323044264771382385",
+  "condition_id": "0x687716958fd97caf5dd7153fe01ba46c40e068356504297f590e25b6b938e31e",
+  "size": 100.0,
+  "price": 0.01,
+  "timestamp": 1794110664,
+  "slug": "sol-updown-5m-1794110400",
+  "outcome": "Down",
+  "outcome_index": 1,
+  "transaction_hash": "0x418d398673b1567b69e96ea1d1deaf33ccae67c61560a3217ff906ce781abe76"
+ }
+}

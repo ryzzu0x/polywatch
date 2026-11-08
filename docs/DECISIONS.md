@@ -24,8 +24,8 @@
 | ADR-001 | Clean Architecture dengan aturan boundary di lint | Diterima |
 | ADR-002 | Python 3.12 + aiogram + PostgreSQL, monolith satu proses | Diterima |
 | ADR-003 | Skor wallet berbasis edge & ROI, bukan win rate | Diusulkan |
-| ADR-004 | Sumber trade: polling Data API (MVP) | Diusulkan — diverifikasi spike T-005 |
-| ADR-005 | Sumber open/close price | Terbuka — diputuskan di spike T-005 |
+| ADR-004 | Sumber trade: polling Data API v2 (MVP) | Diterima (spike T-005, 2026-11-08) |
+| ADR-005 | Sumber open/close price: Polymarket crypto-price (Chainlink), cadangan Binance | Diterima (spike T-005, 2026-11-08) |
 | ADR-006 | MVP alert saja; wallet & eksekusi di v2 dengan gate paper trading | Diterima |
 | ADR-007 | v2: wallet EVM per pengguna, kunci dienkripsi di server (kustodian) + ekspor oleh pengguna | Diterima |
 
@@ -55,21 +55,34 @@
 - **Alternatif:** Win rate murni (menyesatkan); PnL absolut (bias ke wallet bermodal besar).
 - **Konsekuensi:** (+) Sinyal lebih jujur. (−) Wallet baru butuh waktu sebelum bisa dinilai; parameter perlu dikalibrasi dengan data nyata di v1.
 
-### ADR-004 — Sumber trade: polling Data API (MVP)
+### ADR-004 — Sumber trade: polling Data API v2 (MVP)
 - **Tanggal:** 2026-11-08
-- **Status:** Diusulkan — diverifikasi spike T-005
+- **Status:** Diterima (diverifikasi spike T-005 dengan angka nyata; laporan: `docs/spikes/T-005-sumber-data.md`)
 - **Konteks:** Perlu trade per wallet dengan delay rendah. Pengecekan awal: Data API `/trades?market=<conditionId>` mengembalikan trade dengan alamat wallet.
-- **Keputusan:** Polling per market live tiap 2–3 detik dengan cursor waktu, insert idempoten.
-- **Alternatif:** Event on-chain Polygon (OrderFilled) via RPC websocket — paling cepat & lengkap tetapi lebih kompleks (decode log, pemetaan token → market, biaya RPC). Dipertimbangkan di v1 bila target delay ≤ 10 detik tidak tercapai.
-- **Konsekuensi:** (+) Cepat dibangun. (−) Tergantung rate limit & latency API pihak ketiga (TD-001).
+- **Temuan spike (2026-11-08):**
+  - Data API **v1 sudah pensiun (HTTP 410)**; wajib `https://data-api.polymarket.com/v2/trades`.
+  - Filter per market: `?condition=<conditionId>` (bukan `market=`; `token_id` diterima tapi diabaikan — terbukti mengembalikan firehose global).
+  - Pagination **cursor-only** (`next_cursor`); `offset` ditolak 400; `limit` per halaman max 500 (terbukti).
+  - Field per trade lengkap: `proxy_wallet`, `side`, `token_id`, `condition_id`, `size`, `price`, `timestamp`, `outcome`, `outcome_index`, `transaction_hash`.
+  - Duplikat: polling berulang mengembalikan baris sama (1.400/1.500 baris duplikat) → insert wajib idempoten.
+  - **Latency trade→tersedia: median 164 s, p90 251 s** (82 trade baru, market live sol-5m, poll tiap 4 s) — jauh dari target ≤ 10 s.
+  - Rate limit: 10 request berurutan tanpa jeda semua 200; tidak ada header `x-ratelimit-*`; tidak diuji sampai kena limit (sengaja).
+- **Keputusan:** Polling `GET /v2/trades?condition=<conditionId>&limit=500` dengan cursor, insert idempoten (`transaction_hash`+`token_id`+`price`+`size`+`timestamp`), jeda antar poll 2–3 s, total ≤ 5 req/s.
+- **Alternatif:** Event on-chain Polygon (OrderFilled) via RPC websocket — paling cepat & lengkap tetapi lebih kompleks (decode log, pemetaan token → market, biaya RPC). Karena latency polling terukur menit-bukan-detik, event on-chain naik prioritas untuk v1.
+- **Konsekuensi:** (+) Cepat dibangun, field cukup untuk skor wallet. (−) Delay data trade median ~2,7 menit → analisis delay (TD-001) harus pakai `timestamp` trade, bukan waktu insert.
 
-### ADR-005 — Sumber open/close price
+### ADR-005 — Sumber open/close price: Polymarket crypto-price (Chainlink selaras), cadangan Binance
 - **Tanggal:** 2026-11-08
-- **Status:** Terbuka
-- **Konteks:** Market resolve pakai Chainlink (TWAP rentang waktu vs harga di awal rentang). Open/close yang dicatat harus sejalan dengan resolusi.
-- **Keputusan:** Diputuskan setelah spike T-005 membandingkan kandidat sumber terhadap 50 resolusi resmi. Kolom `price_source` selalu disimpan.
-- **Alternatif:** Chainlink langsung; API harga publik (mis. Binance) sebagai cadangan.
-- **Konsekuensi:** Result resmi selalu diambil dari Polymarket; harga hanya sebagai informasi.
+- **Status:** Diterima (diputuskan spike T-005; laporan: `docs/spikes/T-005-sumber-data.md`)
+- **Konteks:** Market resolve pakai Chainlink TWAP 60 s (`resolutionSource` market: `data.chain.link/streams/btc-usd-twap-60s-streams`). Open/close yang dicatat harus sejalan dengan resolusi.
+- **Temuan spike (2026-11-08, 48 market resolved dibandingkan):**
+  - **Utama — `GET polymarket.com/api/crypto/crypto-price?symbol=<aset>&eventStartTime=<unix>`**: mengembalikan `openPrice`/`closePrice` dari feed Chainlink yang sama dengan resolusi. Diverifikasi pada 4 window live: `openPrice` konstan selama window aktif, **3/4 window cocok dengan resolusi resmi**; 1 mismatch karena `openPrice` stale saat pergantian window (konstan 75918.01 selama 3 window sampel). Batasan: `eventStartTime` historis diabaikan → open dicatat saat window mulai, close saat window berakhir (tidak bisa backfill).
+  - **Cadangan — Binance klines 1m**: akurasi **41/48 (85,4%)** terhadap resolusi resmi (spot dan TWAP menit sama-sama 41/48); median selisih pada 7 mismatch hanya US$0,03 — mismatch karena TWAP Chainlink ≠ spot Binance, bukan gap besar. Dipakai sebagai fallback tampilan/volatilitas, bukan acuan arah resolusi.
+  - Chainlink Data Streams langsung: **tidak terukur** (butuh API key; web UI kena bot-checkpoint).
+  - Resolusi resmi sendiri: Gamma `?closed=true` + `umaResolutionStatus="resolved"` + `outcomePrices` (delay resolve setelah end terukur 343 s pada sampel; poll dengan toleransi ±6 menit).
+- **Keputusan:** Sumber open/close utama = Polymarket `crypto-price` (`price_source="polymarket-chainlink"`); cadangan = Binance 1m klines (`price_source="binance-1m"`); kolom `price_source` selalu disimpan. Resolusi resmi selalu diambil dari Gamma, harga hanya informasi.
+- **Alternatif:** Chainlink langsung (butuh kredensial, tidak terukur); Binance sebagai utama (akurasi 85% < kandidat selaras resolusi).
+- **Konsekuensi:** (+) Selaras resolusi, tanpa API key. (−) Tidak bisa backfill historis lewat crypto-price → producer harus online saat window berjalan; `openPrice` pernah stale saat pergantian window → catat kedua sumber (`price_source`) dan audit akurasi otomatis saat producer berjalan; evaluasi ulang di v1 bila akurasi crypto-price < Binance (85,4%).
 
 ### ADR-006 — MVP alert saja; wallet & eksekusi di v2 dengan gate paper trading
 - **Tanggal:** 2026-11-08

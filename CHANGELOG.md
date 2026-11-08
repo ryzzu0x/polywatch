@@ -5,6 +5,14 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Added (T-005)
+- Spike sumber data: laporan `docs/spikes/T-005-sumber-data.md` + contoh respons
+  (`docs/spikes/t005-*.json`) + script probe ulang `scripts/spike/t005_probe.py`
+  (throwaway).
+- ADR-004 Diterima (Data API v2 `?condition=`, cursor-only, latency median 164 s /
+  p90 251 s) dan ADR-005 Diterima (open/close: Polymarket `crypto-price` Chainlink
+  utama, Binance 1m cadangan, akurasi 41/48). ARCHITECTURE §7 diperbarui.
+
 ### Added
 - Fondasi proyek: struktur Clean Architecture (`domain`, `application`, `infrastructure`,
   `presentation`, `main`), konfigurasi env tervalidasi, logging JSON, entrypoint CLI.
