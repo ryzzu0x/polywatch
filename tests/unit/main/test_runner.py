@@ -1,4 +1,4 @@
-"""Unit test runner heartbeat (T-003) — tanpa tidur panjang."""
+"""Unit test runner heartbeat + health loop (T-003, T-019) — tanpa tidur panjang."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -33,6 +34,23 @@ class FakeClock:
         return self._now
 
 
+class FakeHealthMonitor:
+    """Monitor kesehatan palsu — mencatat setiap check()."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.checks = 0
+        self._fail = fail
+
+    async def check(self) -> Any:
+        self.checks += 1
+        if self._fail:
+            raise RuntimeError("check boom")
+        return None
+
+    async def record_cycle(self, kind: str, ok: bool) -> None:  # pragma: no cover
+        return None
+
+
 class FakeContainer(Container):
     """Container dengan clock palsu; tidak menyentuh DB."""
 
@@ -47,6 +65,15 @@ class FakeContainer(Container):
         self.closed = True
 
 
+class HealthContainer(FakeContainer):
+    """Container + health_monitor palsu untuk test loop kesehatan."""
+
+    def __init__(self, clock: FakeClock, monitor: FakeHealthMonitor) -> None:
+        super().__init__(clock)
+        self.health_monitor = monitor
+        self.settings = Settings.model_validate({**_TEST_ENV, "HEALTH_CHECK_INTERVAL_S": "0.01"})
+
+
 async def _run_until_stopped(container: Container, delay_sec: float = 0.05) -> None:
     stop = asyncio.Event()
 
@@ -57,6 +84,43 @@ async def _run_until_stopped(container: Container, delay_sec: float = 0.05) -> N
     async with asyncio.TaskGroup() as tg:
         tg.create_task(stopper())
         await run(container, heartbeat_interval_sec=0.01, stop_event=stop)
+
+
+async def _run_health_until_stopped(container: Container, delay_sec: float = 0.15) -> None:
+    stop = asyncio.Event()
+
+    async def stopper() -> None:
+        await asyncio.sleep(delay_sec)
+        stop.set()
+
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(stopper())
+        await run(container, heartbeat_interval_sec=0.2, stop_event=stop)
+
+
+def test_health_loop_memanggil_check_berkala() -> None:
+    monitor = FakeHealthMonitor()
+    container = HealthContainer(FakeClock(), monitor)
+    asyncio.run(_run_health_until_stopped(container))
+    assert monitor.checks >= 2  # pemeriksaan berkala (interval 10 ms)
+
+
+def test_health_loop_tanpa_monitor_no_op() -> None:
+    container = FakeContainer(FakeClock())
+    asyncio.run(_run_health_until_stopped(container))  # tidak boleh error
+    assert container.closed is True
+
+
+def test_health_loop_check_gagal_tidak_menghentikan_runner(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monitor = FakeHealthMonitor(fail=True)
+    container = HealthContainer(FakeClock(), monitor)
+    with caplog.at_level(logging.ERROR, logger="polywatch.runner"):
+        asyncio.run(_run_health_until_stopped(container))
+    assert monitor.checks >= 2  # loop tetap hidup setelah gagal
+    assert any(r.getMessage() == "pemeriksaan kesehatan gagal" for r in caplog.records)
+    assert container.closed is True
 
 
 def test_run_heartbeat_lalu_berhenti_rapi(caplog: pytest.LogCaptureFixture) -> None:

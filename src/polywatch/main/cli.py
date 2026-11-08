@@ -87,10 +87,18 @@ async def _run_with_bot(container: Container, heartbeat_interval_sec: float) -> 
         container.setup_ingest()
     except Exception:
         # Scheduler/ingest gagal dirakit tidak boleh menghentikan service;
-        # siklus yang gagal di-log terstruktur (T-019 notifikasi menyusul).
+        # siklus yang gagal dilaporkan ke health monitor bila terpasang.
         logger.exception(
             "scheduler/ingest gagal dirakit; runner jalan tanpa siklus",
             extra={"event": "scheduler_setup_failed"},
+        )
+    try:
+        container.setup_health()
+    except Exception:
+        # Health monitor gagal dirakit (mis. jaringan) tidak menghentikan service.
+        logger.exception(
+            "health monitor gagal dirakit; runner jalan tanpa notifikasi kesehatan",
+            extra={"event": "health_setup_failed"},
         )
     await run(container, heartbeat_interval_sec=heartbeat_interval_sec)
 

@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     result_interval_s: float = Field(default=30.0, alias="RESULT_INTERVAL_S")
     heartbeat_interval_s: float = Field(default=60.0, alias="HEARTBEAT_INTERVAL_S")
 
+    #: Health monitor (T-019): ambang basi, rate limit notifikasi, grace period.
+    stale_ingest_s: float = Field(default=120.0, alias="STALE_INGEST_S")
+    stale_discover_s: float = Field(default=180.0, alias="STALE_DISCOVER_S")
+    health_rate_limit_s: float = Field(default=600.0, alias="HEALTH_RATE_LIMIT_S")
+    health_grace_s: float = Field(default=300.0, alias="HEALTH_GRACE_S")
+    health_check_interval_s: float = Field(default=30.0, alias="HEALTH_CHECK_INTERVAL_S")
+
     polymarket_gamma_url: str = Field(
         default="https://gamma-api.polymarket.com", alias="POLYMARKET_GAMMA_URL"
     )

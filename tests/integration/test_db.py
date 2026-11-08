@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -130,3 +130,63 @@ async def test_users_telegram_id_unik(session: AsyncSession) -> None:
     with pytest.raises(IntegrityError):
         await session.flush()
     await session.rollback()
+
+
+async def test_last_trade_at_live_hanya_market_live(session: AsyncSession) -> None:
+    """T-019: bacaan aktivitas health monitor — trade terakhir market LIVE saja."""
+    from polywatch.infrastructure.db.repositories.trade_repository import (
+        SqlAlchemyTradeRepository,
+    )
+
+    session.add(AssetModel(symbol="eth", name="Ethereum", enabled_default=True))
+    await session.flush()
+    asset_id = (await session.scalars(select(AssetModel))).one().id
+
+    start = datetime(2026, 11, 8, 13, 0, tzinfo=UTC)
+    for status in (MarketStatus.LIVE, MarketStatus.RESOLVED):
+        session.add(
+            MarketModel(
+                condition_id=f"0x{status.value}",
+                slug=f"eth-updown-5m-1762606800-{status.value}",
+                asset_id=asset_id,
+                timeframe=Timeframe.FIVE_MINUTES,
+                start_at=start,
+                end_at=start + Timeframe.FIVE_MINUTES.duration,
+                token_up="tok-up",
+                token_down="tok-down",
+                status=status,
+            )
+        )
+    await session.flush()
+    markets = {m.status.value: m.id for m in await session.scalars(select(MarketModel))}
+    live_id, resolved_id = markets["live"], markets["resolved"]
+
+    await session.execute(
+        insert(TradeModel),
+        dict(_TRADE_ROW, market_id=live_id, traded_at=start + timedelta(minutes=1)),
+    )
+    await session.execute(
+        insert(TradeModel),
+        dict(
+            _TRADE_ROW,
+            tx_hash="0xdead02",
+            log_index=2,
+            market_id=resolved_id,
+            traded_at=start + timedelta(minutes=2),  # lebih baru tapi bukan LIVE
+        ),
+    )
+    await session.commit()
+
+    repo = SqlAlchemyTradeRepository(session)
+    last = await repo.last_trade_at_live()
+    assert last == start + timedelta(minutes=1)
+
+
+async def test_last_trade_at_live_kosong(session: AsyncSession) -> None:
+    """Tanpa trade sama sekali → None (grace period health monitor)."""
+    from polywatch.infrastructure.db.repositories.trade_repository import (
+        SqlAlchemyTradeRepository,
+    )
+
+    repo = SqlAlchemyTradeRepository(session)
+    assert await repo.last_trade_at_live() is None

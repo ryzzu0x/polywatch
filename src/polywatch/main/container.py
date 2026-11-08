@@ -87,6 +87,7 @@ class Container:
     discover_cycle: Any | None = field(default=None, repr=False)
     record_result_cycle: Any | None = field(default=None, repr=False)
     recompute_cycle: Any | None = field(default=None, repr=False)
+    health_monitor: Any | None = field(default=None, repr=False)
 
     def setup_scheduler(self) -> None:
         """Rakit use case siklus penuh untuk scheduler (T-018 wiring).
@@ -164,6 +165,38 @@ class Container:
         logger.info(
             "use case scheduler dirakit",
             extra={"event": "container_scheduler_setup", "version": __version__},
+        )
+
+    def setup_health(self) -> None:
+        """Rakit HealthMonitor (T-019): bacaan aktivitas + notifier owner.
+
+        State kesehatan in-memory (ADR-008) — tidak ada tabel baru. Notifikasi
+        keluar tetap lewat port `Notifier` (TelegramNotifier), bukan aiogram
+        langsung dari use case.
+        """
+        from polywatch.application.use_cases.health_monitor import HealthMonitor
+        from polywatch.infrastructure.db.repositories.trade_repository import (
+            SqlAlchemyTradeRepository,
+        )
+        from polywatch.infrastructure.telegram_notifier import TelegramNotifier
+
+        activity = SqlAlchemyTradeRepository(self.session_factory())
+        notifier = TelegramNotifier(
+            bot_token=self.settings.bot_token.get_secret_value(),
+            owner_chat_id=self.settings.owner_chat_id,
+        )
+        self.health_monitor = HealthMonitor(
+            activity=activity,
+            notifier=notifier,
+            clock=self.clock,
+            stale_ingest_s=self.settings.stale_ingest_s,
+            stale_discover_s=self.settings.stale_discover_s,
+            rate_limit_s=self.settings.health_rate_limit_s,
+            grace_s=self.settings.health_grace_s,
+        )
+        logger.info(
+            "health monitor dirakit",
+            extra={"event": "container_health_setup", "version": __version__},
         )
 
     @classmethod

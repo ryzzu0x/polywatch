@@ -5,6 +5,7 @@ from polywatch.application.ports.notifier import Notifier
 from polywatch.application.ports.repositories import (
     AlertSettingsRepository,
     AlertsSentRepository,
+    HealthActivityRepository,
     MarketRepository,
     MarketStatsRepository,
     TradeRepository,
@@ -26,6 +27,7 @@ __all__ = [
     "AlertSettingsRepository",
     "AlertsSentRepository",
     "Clock",
+    "HealthActivityRepository",
     "MarketRepository",
     "MarketSource",
     "MarketStatsRepository",

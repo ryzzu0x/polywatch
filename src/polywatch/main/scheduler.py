@@ -8,9 +8,13 @@ Task periodik asyncio dengan interval dari `Settings`:
 
 Satu siklus gagal (exception) tidak mematikan proses: ditangkap, di-log
 error terstruktur (`scheduler_cycle_error`), siklus berikutnya tetap jalan.
-Semua task dibatalkan rapi lewat `stop_event` (SIGINT/SIGTERM lewat runner).
 
-Notifikasi error ke owner = T-019, bukan scope modul ini.
+T-019: setiap siklus dilaporkan ke health monitor (`record_cycle`) —
+keberhasilan dihitung sebagai aktivitas terbaru komponen, kegagalan tidak
+(memicu notifikasi basi via `HealthMonitor.check`). Laporan yang gagal
+dikirim tidak mengganggu loop.
+
+Semua task dibatalkan rapi lewat `stop_event` (SIGINT/SIGTERM lewat runner).
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ import logging
 from typing import Any, Protocol
 
 from polywatch import __version__
+from polywatch.application.use_cases.health_monitor import CycleKind
 from polywatch.main.config import Settings
 
 logger = logging.getLogger("polywatch.scheduler")
@@ -47,6 +52,12 @@ class RecomputeCycle(Protocol):
     async def execute(self, market_id: int) -> Any: ...
 
 
+class HealthReporter(Protocol):
+    """Penerima laporan siklus scheduler (mis. HealthMonitor, T-019)."""
+
+    async def record_cycle(self, kind: CycleKind, ok: bool) -> None: ...
+
+
 def _resolved_ids(summaries: list[Any]) -> list[int]:
     """Ambil market_id resolved dari ringkasan RecordResult (duck-typed)."""
     ids: list[int] = []
@@ -58,16 +69,29 @@ def _resolved_ids(summaries: list[Any]) -> list[int]:
     return ids
 
 
-async def _run_cycle(name: str, cycle: Any) -> Any:
-    """Jalankan satu siklus; exception di-log terstruktur, tidak diteruskan."""
+async def _run_cycle(name: str, cycle: Any) -> tuple[bool, Any]:
+    """Jalankan satu siklus; return (sukses, hasil). Exception di-log, tidak diteruskan."""
     try:
-        return await cycle()
+        return True, await cycle()
     except Exception:
         logger.exception(
             "siklus scheduler gagal",
             extra={"event": "scheduler_cycle_error", "cycle": name},
         )
-        return None
+        return False, None
+
+
+async def _report(monitor: HealthReporter | None, kind: CycleKind, ok: bool) -> None:
+    """Laporkan hasil siklus ke health monitor; gagal lapor tidak mengganggu loop."""
+    if monitor is None:
+        return
+    try:
+        await monitor.record_cycle(kind, ok)
+    except Exception:
+        logger.exception(
+            "laporan siklus ke health monitor gagal",
+            extra={"event": "health_report_error", "cycle": kind},
+        )
 
 
 async def _wait(stop_event: asyncio.Event, interval_sec: float) -> None:
@@ -80,10 +104,12 @@ async def discover_loop(
     discover: DiscoverCycle,
     interval_sec: float,
     stop_event: asyncio.Event,
+    monitor: HealthReporter | None = None,
 ) -> None:
     """Loop discover market: jalan segera lalu tiap interval."""
     while not stop_event.is_set():
-        await _run_cycle("discover", discover.execute)
+        ok, _ = await _run_cycle("discover", discover.execute)
+        await _report(monitor, "discover", ok)
         await _wait(stop_event, interval_sec)
     logger.info(
         "loop discover berhenti", extra={"event": "scheduler_loop_stop", "cycle": "discover"}
@@ -95,10 +121,12 @@ async def result_loop(
     recompute: RecomputeCycle,
     interval_sec: float,
     stop_event: asyncio.Event,
+    monitor: HealthReporter | None = None,
 ) -> None:
     """Loop result: resolve market CLOSED baru, lalu recompute market itu."""
     while not stop_event.is_set():
-        summaries = await _run_cycle("record_result", record_result.execute)
+        ok, summaries = await _run_cycle("record_result", record_result.execute)
+        await _report(monitor, "result", ok)
         for market_id in _resolved_ids(summaries or []):
             await _run_cycle("recompute_scores", lambda mid=market_id: recompute.execute(mid))
         await _wait(stop_event, interval_sec)
@@ -118,6 +146,7 @@ def create_scheduler_tasks(
     recompute: RecomputeCycle,
     settings: Settings,
     stop_event: asyncio.Event,
+    monitor: HealthReporter | None = None,
 ) -> list[asyncio.Task[None]]:
     """Buat kedua task loop scheduler (dibatalkan bersama stop_event)."""
     discover_sec, result_sec = intervals_from_settings(settings)
@@ -128,14 +157,16 @@ def create_scheduler_tasks(
             "version": __version__,
             "discover_interval_s": discover_sec,
             "result_interval_s": result_sec,
+            "health_monitor": monitor is not None,
         },
     )
     return [
         asyncio.create_task(
-            discover_loop(discover, discover_sec, stop_event), name="scheduler-discover"
+            discover_loop(discover, discover_sec, stop_event, monitor),
+            name="scheduler-discover",
         ),
         asyncio.create_task(
-            result_loop(record_result, recompute, result_sec, stop_event),
+            result_loop(record_result, recompute, result_sec, stop_event, monitor),
             name="scheduler-result",
         ),
     ]
@@ -153,6 +184,7 @@ __all__ = [
     "DEFAULT_DISCOVER_INTERVAL_SEC",
     "DEFAULT_RESULT_INTERVAL_SEC",
     "DiscoverCycle",
+    "HealthReporter",
     "RecomputeCycle",
     "ResultCycle",
     "cancel_all",

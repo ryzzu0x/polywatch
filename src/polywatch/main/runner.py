@@ -6,7 +6,9 @@ Satu proses menjalankan bersamaan:
     bila `setup_scheduler` dipanggil),
 (c) siklus heartbeat existing,
 (d) hook ingest trade bila terpasang (`ingest_hooks`) tanpa mengubah
-    perilaku bila kosong.
+    perilaku bila kosong,
+(e) pemeriksaan kesehatan berkala (T-019, no-op bila `health_monitor`
+    belum dirakit).
 
 SIGINT/SIGTERM membatalkan semua task lalu menutup container (session Bot +
 engine DB) lewat `aclose`.
@@ -56,7 +58,9 @@ async def _run_ingest_hooks(container: Container, interval_sec: float) -> None:
 
 
 def _start_scheduler(container: Container, stop_event: asyncio.Event) -> list[asyncio.Task[None]]:
-    """Buat task scheduler bila use case siklus sudah dirakit; kosong bila belum."""
+    """Buat task scheduler bila use case siklus sudah dirakit; kosong bila belum.
+
+    Health monitor (bila dirakit) menerima laporan tiap siklus (T-019)."""
     discover = getattr(container, "discover_cycle", None)
     record_result = getattr(container, "record_result_cycle", None)
     recompute = getattr(container, "recompute_cycle", None)
@@ -68,6 +72,7 @@ def _start_scheduler(container: Container, stop_event: asyncio.Event) -> list[as
         recompute=recompute,
         settings=container.settings,
         stop_event=stop_event,
+        monitor=getattr(container, "health_monitor", None),
     )
 
 
@@ -86,6 +91,33 @@ async def _poll_bot(container: Container) -> None:
     with contextlib.suppress(asyncio.CancelledError):
         # handle_signals=False: sinyal ditangani runner (satu tempat).
         await dispatcher.start_polling(bot, handle_signals=False)
+
+
+async def _health_loop(
+    container: Container, interval_sec: float, stop_event: asyncio.Event
+) -> None:
+    """Loop pemeriksaan kesehatan (T-019) — no-op bila monitor tidak terpasang."""
+    monitor = getattr(container, "health_monitor", None)
+    if monitor is None:
+        return
+    with contextlib.suppress(asyncio.CancelledError):
+        while not stop_event.is_set():
+            try:
+                report = await monitor.check()
+                if report.stale_names:
+                    logger.warning(
+                        "komponen basi terdeteksi",
+                        extra={
+                            "event": "health_stale_detected",
+                            "components": ",".join(report.stale_names),
+                        },
+                    )
+            except Exception:
+                logger.exception(
+                    "pemeriksaan kesehatan gagal", extra={"event": "health_check_error"}
+                )
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), timeout=interval_sec)
 
 
 async def run(
@@ -135,6 +167,14 @@ async def run(
         )
         # (d) hook ingest (no-op bila kosong)
         tasks.append(asyncio.create_task(_run_ingest_hooks(container, heartbeat_interval_sec)))
+        # (e) pemeriksaan kesehatan berkala (no-op bila monitor tidak terpasang)
+        health_interval = float(getattr(container.settings, "health_check_interval_s", 30.0))
+        tasks.append(
+            asyncio.create_task(
+                _health_loop(container, max(health_interval, 0.0), stop_event),
+                name="health-monitor",
+            )
+        )
 
         await stop_event.wait()
     finally:

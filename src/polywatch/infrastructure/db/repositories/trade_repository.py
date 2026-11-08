@@ -16,8 +16,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polywatch.application.dto.trade import ResolvedTrade
+from polywatch.domain.market import MarketStatus
 from polywatch.domain.trade import Trade
-from polywatch.infrastructure.db.models import MarketResultModel, TradeModel
+from polywatch.infrastructure.db.models import MarketModel, MarketResultModel, TradeModel
 
 
 class SqlAlchemyTradeRepository:
@@ -72,6 +73,15 @@ class SqlAlchemyTradeRepository:
     async def last_traded_at(self, market_id: int) -> datetime | None:
         """Waktu trade terakhir market (untuk backfill sejak terakhir)."""
         stmt = select(func.max(TradeModel.traded_at)).where(TradeModel.market_id == market_id)
+        return await self._session.scalar(stmt)
+
+    async def last_trade_at_live(self) -> datetime | None:
+        """Waktu trade terakhir pada market berstatus LIVE (health monitor T-019)."""
+        stmt = select(func.max(TradeModel.traded_at)).where(
+            TradeModel.market_id.in_(
+                select(MarketModel.id).where(MarketModel.status == MarketStatus.LIVE)
+            )
+        )
         return await self._session.scalar(stmt)
 
     async def wallets_for_market(self, market_id: int) -> Sequence[str]:

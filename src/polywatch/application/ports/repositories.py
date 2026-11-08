@@ -71,6 +71,18 @@ class TradeStatsRepository(Protocol):
         ...
 
 
+class HealthActivityRepository(Protocol):
+    """Bacaan aktivitas untuk health monitor (T-019).
+
+    Interface segregation: HealthMonitor hanya butuh satu bacaan ringan,
+    tidak seluruh port persistensi trade.
+    """
+
+    async def last_trade_at_live(self) -> datetime | None:
+        """Waktu trade terakhir pada market berstatus LIVE (None bila kosong)."""
+        ...
+
+
 class UserRepository(Protocol):
     """Resolusi `users` dari telegram_id (MVP single-owner)."""
 

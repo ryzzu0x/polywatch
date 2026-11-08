@@ -28,6 +28,16 @@ _TEST_ENV = {
 }
 
 
+class FakeMonitor:
+    """Penerima laporan siklus palsu (T-019)."""
+
+    def __init__(self) -> None:
+        self.reports: list[tuple[str, bool]] = []
+
+    async def record_cycle(self, kind: str, ok: bool) -> None:
+        self.reports.append((kind, ok))
+
+
 class FakeDiscover:
     def __init__(self, raise_times: set[int] | None = None) -> None:
         self.calls = 0
@@ -154,3 +164,37 @@ async def test_market_timeout_tidak_direcompute() -> None:
     recompute = FakeRecompute()
     await _run_for(discover, record, recompute, duration_s=0.1, settings=_settings(0.03, 0.03))
     assert 9 not in recompute.market_ids
+
+
+async def test_siklus_dilaporkan_ke_health_monitor() -> None:
+    """T-019: tiap siklus (sukses & gagal) dilaporkan ke monitor."""
+    discover = FakeDiscover(raise_times={1})  # siklus kedua gagal
+    record = FakeRecordResult()
+    recompute = FakeRecompute()
+    monitor = FakeMonitor()
+    stop = asyncio.Event()
+    tasks = create_scheduler_tasks(
+        discover, record, recompute, _settings(0.03, 0.03), stop, monitor=monitor
+    )
+    await asyncio.sleep(0.15)
+    stop.set()
+    await cancel_all(tasks)
+
+    discover_reports = [ok for kind, ok in monitor.reports if kind == "discover"]
+    result_reports = [ok for kind, ok in monitor.reports if kind == "result"]
+    assert len(discover_reports) >= 3
+    assert len(result_reports) >= 3
+    assert False in discover_reports  # siklus gagal dilaporkan ok=False
+    assert all(result_reports)  # record sukses semua
+    # Hanya discover & result yang dilaporkan (recompute bukan komponen monitor).
+    assert {kind for kind, _ in monitor.reports} == {"discover", "result"}
+
+
+async def test_loop_tanpa_monitor_tetap_jalan() -> None:
+    """Monitor tidak terpasang (None) tidak mengganggu loop."""
+    discover = FakeDiscover()
+    record = FakeRecordResult()
+    recompute = FakeRecompute()
+    await _run_for(discover, record, recompute, duration_s=0.1, settings=_settings(0.03, 0.03))
+    assert discover.calls >= 2
+    assert record.calls >= 2
