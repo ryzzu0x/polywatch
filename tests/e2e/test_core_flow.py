@@ -114,10 +114,11 @@ TOKEN_ID = 781302770203152653425687041313026630943003983868386742113370726073968
 
 OWNER_TELEGRAM_ID = 988_001_001  # unik untuk e2e agar tidak bentrok user lain
 
-# Waktu market: 5m window yang sedang LIVE saat T0.
-T0 = datetime(2026, 11, 8, 12, 0, 0, tzinfo=UTC)
+# Waktu market: 5m window yang sedang LIVE saat T0 (start tepat 11:55,
+# kelipatan 5m — identitas jendela discovery slug, T-024).
+T0 = datetime(2026, 11, 8, 12, 2, 0, tzinfo=UTC)
 SLUG_LIVE = f"btc-updown-5m-{int((T0 - timedelta(minutes=2)).timestamp())}"
-SLUG_UPCOMING = f"eth-updown-5m-{int((T0 + timedelta(minutes=10)).timestamp())}"
+SLUG_UPCOMING = f"eth-updown-5m-{int((T0 + timedelta(minutes=8)).timestamp())}"
 TOKEN_UP = str(TOKEN_ID)
 TOKEN_DOWN = str(TOKEN_ID + 1)
 
@@ -162,27 +163,29 @@ class FakeMarketSource:
         self.resolved = resolved
         self.get_result_calls: list[str] = []
 
-    async def list_markets(self, timeframe: Timeframe) -> list[MarketSnapshot]:
-        if timeframe is not Timeframe.FIVE_MINUTES:
-            return []
-        return [
-            MarketSnapshot(
+    async def fetch_by_slug(self, slug: str, *, closed: bool) -> MarketSnapshot | None:
+        if slug == SLUG_LIVE:
+            return MarketSnapshot(
                 slug=SLUG_LIVE,
                 condition_id="0xcond-live",
                 token_up=TOKEN_UP,
                 token_down=TOKEN_DOWN,
                 volume_usdc=Decimal("125_000"),
                 closed=False,
-            ),
-            MarketSnapshot(
+            )
+        if slug == SLUG_UPCOMING:
+            return MarketSnapshot(
                 slug=SLUG_UPCOMING,
                 condition_id="0xcond-upcoming",
                 token_up="111111111111",
                 token_down="222222222222",
                 volume_usdc=Decimal("0"),
                 closed=False,
-            ),
-        ]
+            )
+        return None
+
+    async def list_markets(self, timeframe: Timeframe) -> list[MarketSnapshot]:
+        return []
 
     async def get_result(self, slug: str) -> MarketResultSnapshot | None:
         self.get_result_calls.append(slug)
@@ -306,10 +309,15 @@ async def test_e2e_core_flow(session: AsyncSession) -> None:
     alerts_sent = SqlAlchemyAlertsSentRepository(session)
 
     # --- 1. discover_markets: market live + upcoming tersimpan, aset auto ---
+    async def _no_sleep(_: float) -> None:
+        return None
+
     discover = DiscoverMarkets(
         source=cast(MarketSource, market_source),
         repository=cast(MarketRepository, markets),
         clock=StubClock(start=T0, step_s=0),
+        default_assets=("btc", "eth"),
+        sleep=_no_sleep,
     )
     summary = await discover.execute()
     await session.commit()

@@ -43,6 +43,9 @@ class FakeMarketSource:
         self._results = list(results_per_poll)
         self.get_result_calls = 0
 
+    async def fetch_by_slug(self, slug: str, *, closed: bool) -> MarketSnapshot | None:
+        return None
+
     async def list_markets(self, timeframe: Timeframe) -> Sequence[MarketSnapshot]:
         return []
 

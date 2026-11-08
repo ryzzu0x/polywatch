@@ -35,6 +35,20 @@ class Settings(BaseSettings):
     health_grace_s: float = Field(default=300.0, alias="HEALTH_GRACE_S")
     health_check_interval_s: float = Field(default=30.0, alias="HEALTH_CHECK_INTERVAL_S")
 
+    #: Aset default discovery market (T-024) — dipakai discover_markets.
+    market_assets: tuple[str, ...] = Field(
+        default=("btc", "eth", "sol", "xrp", "doge", "bnb", "hype", "zec", "xag", "xau"),
+        alias="MARKET_ASSETS",
+    )
+
+    @field_validator("market_assets")
+    @classmethod
+    def _check_market_assets(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(a.strip().lower() for a in value if a and a.strip().isalnum())
+        if not normalized:
+            raise ValueError("MARKET_ASSETS tidak boleh kosong (contoh: btc,eth,sol)")
+        return normalized
+
     polymarket_gamma_url: str = Field(
         default="https://gamma-api.polymarket.com", alias="POLYMARKET_GAMMA_URL"
     )

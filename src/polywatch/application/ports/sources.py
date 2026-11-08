@@ -15,6 +15,13 @@ from polywatch.domain.market import Timeframe
 class MarketSource(Protocol):
     """Sumber daftar market dan statusnya (Polymarket Gamma API)."""
 
+    async def fetch_by_slug(self, slug: str, *, closed: bool) -> MarketSnapshot | None:
+        """Market tunggal lewat slug (T-024); None bila tidak ditemukan.
+
+        `closed=True` untuk jendela yang sudah selesai.
+        """
+        ...
+
     async def list_markets(self, timeframe: Timeframe) -> Sequence[MarketSnapshot]: ...
 
     async def get_result(self, slug: str) -> MarketResultSnapshot | None: ...

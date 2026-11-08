@@ -1,9 +1,9 @@
 """Adapter Gamma API Polymarket (implementasi port MarketSource).
 
-Polling market live: `GET /markets?closed=false&order=endDate&ascending=true
-&end_date_min=<ISO now-1h>` (+ limit/offset) — sesuai temuan T-005; jangan
-pakai pencarian slug untuk market live karena market hilang dari hasil `?slug=`
-beberapa menit setelah end.
+T-024 — discovery berbasis slug per jendela waktu: pencarian market
+live/upcoming lewat `GET /markets?slug=<slug>` (dipanggil use case
+discover_markets yang menghitung slug-nya). Endpoint list tetap tersedia
+sebagai supplement (T-007) dan hasilnya difilter anti-stale oleh pemanggil.
 
 Field `clobTokenIds`/`outcomes` berupa string JSON, bukan list — parsing
 wajib tahan error: catat & skip market rusak, jangan crash seluruh batch.
@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import random
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -41,6 +42,8 @@ _RETRY_BASE_DELAY = 0.5  # detik
 _TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 # Gamma menolak offset > 2000 ("use /markets/keyset for deeper pagination").
 _MAX_OFFSET = 2000
+#: Rate limit discovery: jeda minimum antar-request slug (≤5 req/s, T-024).
+_SLUG_FETCH_INTERVAL = 0.25
 
 
 class GammaClientError(RuntimeError):
@@ -107,26 +110,40 @@ class GammaMarketSource:
 
     def __init__(self, base_url: str) -> None:
         self._base_url = base_url.rstrip("/")
+        self._last_fetch_monotonic = 0.0
 
-    async def list_markets(self, timeframe: Timeframe) -> list[MarketSnapshot]:
+    def _throttle(self) -> None:
+        """Jeda minimum antar-request slug — rate limit Gamma ≤5 req/s (T-024)."""
+        now_mono = asyncio.get_running_loop().time()
+        elapsed = now_mono - self._last_fetch_monotonic
+        if elapsed < _SLUG_FETCH_INTERVAL:
+            time.sleep(_SLUG_FETCH_INTERVAL - elapsed)
+        self._last_fetch_monotonic = time.monotonic()
+
+    async def list_markets(
+        self, timeframe: Timeframe, *, window_seconds: int | None = None
+    ) -> list[MarketSnapshot]:
         """Ambil semua market Up/Down live untuk satu timeframe (paginasi offset).
 
+        Jalur cadangan discovery (T-024) — pemanggil wajib memfilter hasil
+        anti-stale (endDate dekat sekarang). `window_seconds` memakai pencarian
+        slug `{tf}-{unix}` bila diisi: halaman belakang list-endpoint berisi
+        market basi (Des 2025, tak pernah ditutup) yang mengotori hasil.
         Market dengan payload rusak atau slug di luar timeframe di-skip
         dengan log, bukan menggagalkan batch.
         """
         now = datetime.now(tz=UTC)
-        # jendela [now-1j, now+3j]: market Up/Down hanya 5m/15m (maks 4h) ke depan.
-        # end_date_max membatasi hasil sehingga offset jauh dari batas 2000 Gamma.
-        window_max = now + timedelta(hours=3)
         params: dict[str, str] = {
             "closed": "false",
             "active": "true",
             "order": "endDate",
             "ascending": "true",
             "end_date_min": (now - timedelta(hours=1)).isoformat(),
-            "end_date_max": window_max.isoformat(),
+            "end_date_max": (now + timedelta(hours=3)).isoformat(),
             "limit": str(_PAGE_LIMIT),
         }
+        if window_seconds is not None:
+            params["end_date_min"] = (now - timedelta(seconds=window_seconds)).isoformat()
         snapshots: list[MarketSnapshot] = []
         offset = 0
         while True:
@@ -172,6 +189,28 @@ class GammaMarketSource:
         raise GammaClientError(f"Gamma {url} gagal setelah {_MAX_RETRIES} percobaan") from (
             last_error
         )
+
+    async def fetch_by_slug(self, slug: str, *, closed: bool) -> MarketSnapshot | None:
+        """Cari satu market lewat slug: `GET /markets?slug=<slug>` (T-024).
+
+        `closed=False` untuk jendela berjalan/ke depan; `closed=True` untuk
+        jendela ke belakang (market live hilang dari pencarian slug setelah
+        end — temuan T-005). Market dengan payload rusak di-skip dengan log.
+        """
+        params: dict[str, str] = {"slug": slug, "closed": "true" if closed else "false"}
+        page = await self._get_markets_page(params)
+        for index, payload in enumerate(page):
+            if payload.get("slug") != slug:
+                continue
+            try:
+                return parse_market_payload(payload)
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                logger.warning(
+                    "market Gamma di-skip: payload rusak",
+                    extra={"slug": slug, "index": index, "error": str(exc)},
+                )
+                return None
+        return None
 
     async def get_result(self, slug: str) -> MarketResultSnapshot | None:
         """Ambil hasil resolusi satu market lewat slug (hanya valid untuk yang resolved).

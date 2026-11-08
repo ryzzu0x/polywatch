@@ -198,6 +198,9 @@ class Container:
                     source=gamma,
                     repository=SqlAlchemyMarketRepository(self.scoped_session()),
                     clock=self.clock,
+                    known_assets=SqlAlchemyMarketRepository(self.scoped_session()),
+                    default_assets=self.settings.market_assets,
+                    supplement_source=gamma,
                 )
                 summary = await discover.execute()
                 await self._session_commit()

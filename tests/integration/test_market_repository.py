@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from polywatch.application.use_cases.discover_markets import DiscoverMarkets
-from polywatch.domain.market import MarketStatus
+from polywatch.domain.market import MarketStatus, Timeframe
 from polywatch.infrastructure.clock import SystemClock
 from polywatch.infrastructure.db.models import AssetModel, Base, MarketModel
 from polywatch.infrastructure.db.repositories.market_repository import (
@@ -41,6 +41,11 @@ pytestmark = pytest.mark.skipif(
 
 GAMMA = "https://gamma-api.polymarket.com"
 FIXTURE = Path("docs/spikes/t005-gamma-market-sample.json")
+
+
+async def _no_sleep(_: float) -> None:
+    """No-op sleep — test integration jalan tanpa jeda antar-request slug."""
+    return None
 
 
 @pytest_asyncio.fixture
@@ -190,71 +195,116 @@ async def test_list_by_status(session: AsyncSession) -> None:
 
 @respx.mock
 async def test_discover_end_to_end_idempoten(session: AsyncSession) -> None:
-    """discover_markets dua kali dengan sumber Gamma (mock): tanpa duplikat."""
-    respx.get(f"{GAMMA}/markets").mock(return_value=httpx.Response(200, json=_gamma_page(5)))
+    """discover_markets dua kali dengan sumber Gamma (mock): tanpa duplikat.
+
+    T-024: pencarian per slug — hanya jendela berjalan yang mengembalikan
+    market, sisanya 404/empty. Verifikasi live: slug berisi window start yang
+    dihitung dari waktu sekarang, bukan dari urutan API.
+    """
+    now = datetime.now(tz=UTC)
+    current = int(now.timestamp()) // 300 * 300
+    page = _gamma_page(1)
+    page[0]["slug"] = f"btc-updown-5m-{current}"
+
+    def route(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        if "slug" in params:
+            # jalur utama per-slug: hanya market berjalan yang ada
+            if params["slug"] == f"btc-updown-5m-{current}":
+                return httpx.Response(200, json=page)
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json=[])
+
+    respx.get(f"{GAMMA}/markets").mock(side_effect=route)
 
     source = GammaMarketSource(GAMMA)
     repo = SqlAlchemyMarketRepository(session)
-    use_case = DiscoverMarkets(source=source, repository=repo, clock=SystemClock())
+    use_case = DiscoverMarkets(
+        source=source,
+        repository=repo,
+        clock=SystemClock(),
+        default_assets=("btc",),
+        timeframes=(Timeframe.FIVE_MINUTES,),
+        sleep=_no_sleep,
+    )
 
     first = await use_case.execute()
     await session.commit()
     second = await use_case.execute()
     await session.commit()
 
-    assert first.new_markets == 5
-    assert first.total_markets == 5
+    assert first.new_markets == 1
+    assert first.total_markets == 1
     assert second.new_markets == 0
-    assert second.total_markets == 5
-    assert await _count(session, MarketModel) == 5  # tidak ada duplikat
+    assert second.total_markets == 1
+    assert await _count(session, MarketModel) == 1  # tidak ada duplikat
     assert await _count(session, AssetModel) == 1  # semua btc
+    stored = await repo.get_by_slug(f"btc-updown-5m-{current}")
+    assert stored is not None
+    assert stored.status in {MarketStatus.LIVE, MarketStatus.CLOSED}
 
 
 @respx.mock
-async def test_discover_slug_aneh_tidak_menggagalkan_batch(session: AsyncSession) -> None:
-    page = _gamma_page(2)
-    weird = dict(page[0])
-    weird["slug"] = "akan-presiden-2026"
-    weird["conditionId"] = "0xweird"
-    respx.get(f"{GAMMA}/markets").mock(return_value=httpx.Response(200, json=[weird, *page]))
+async def test_discover_market_basi_tidak_masuk(session: AsyncSession) -> None:
+    """Market basi Des 2025 dari Gamma → ditolak filter anti-stale (T-024)."""
+    stale = dict(_gamma_page(1)[0])
+    stale["slug"] = "eth-updown-5m-1766161800"  # end 2025-12-19, ~11 bulan lalu
+    stale["conditionId"] = "0xstale"
+
+    def route(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        if "slug" in params:
+            if params["slug"] == "eth-updown-5m-1766161800":
+                return httpx.Response(200, json=[stale])
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json=[stale])  # jalur supplement
+
+    respx.get(f"{GAMMA}/markets").mock(side_effect=route)
 
     use_case = DiscoverMarkets(
         source=GammaMarketSource(GAMMA),
         repository=SqlAlchemyMarketRepository(session),
         clock=SystemClock(),
+        default_assets=("eth",),
+        timeframes=(Timeframe.FIVE_MINUTES,),
+        sleep=_no_sleep,
+        supplement_source=GammaMarketSource(GAMMA),
     )
     summary = await use_case.execute()
     await session.commit()
 
-    # slug aneh difilter di adapter Gamma (bukan pola updown); batch tetap utuh
-    assert summary.total_markets == 2
-    assert summary.skipped_slugs == 0
-    assert await _count(session, MarketModel) == 2
-    assert await _count(session, AssetModel) == 1
+    assert summary.total_markets == 0
+    assert summary.stale_filtered >= 1
+    assert await _count(session, MarketModel) == 0
 
 
 @respx.mock
-async def test_discover_market_live_status_sesuai_waktu(session: AsyncSession) -> None:
-    """Snapshot live dari Gamma untuk market yang sudah lewat → CLOSED (bukan LIVE)."""
-    page = _gamma_page(1)
-    # slug start 1794110400 = 2026-11-07T04:00:00Z; sudah lampau dari "sekarang"
-    assert (
-        datetime.fromtimestamp(1794110400, tz=UTC) < datetime.now(tz=UTC) - timedelta(days=1)
-        or True
-    )  # dokumentasi asumsi; start fixture memang masa lalu
+async def test_discover_jendela_depan_dan_belakang_diquery(session: AsyncSession) -> None:
+    """offset<0 memakai closed=true; jendela depan closed=false (T-024)."""
+    current = int(datetime.now(tz=UTC).timestamp()) // 300 * 300
+    seen: dict[str, str] = {}
 
-    respx.get(f"{GAMMA}/markets").mock(return_value=httpx.Response(200, json=page))
+    def route(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        if "slug" in params:
+            seen[params["slug"]] = params["closed"]
+        return httpx.Response(200, json=[])
+
+    respx.get(f"{GAMMA}/markets").mock(side_effect=route)
 
     use_case = DiscoverMarkets(
         source=GammaMarketSource(GAMMA),
         repository=SqlAlchemyMarketRepository(session),
         clock=SystemClock(),
+        default_assets=("btc",),
+        timeframes=(Timeframe.FIVE_MINUTES,),
+        sleep=_no_sleep,
     )
     await use_case.execute()
-    await session.commit()
 
-    stored = await SqlAlchemyMarketRepository(session).get_by_slug("btc-updown-5m-1794110400")
-    assert stored is not None
-    # fixture bertanggal 2026-11-07; terhadap jam sekarang market itu pasti sudah
-    # selesai → minimal bukan UPCOMING (LIVE bila jam test < end, CLOSED setelahnya)
-    assert stored.status in {MarketStatus.LIVE, MarketStatus.CLOSED}
+    assert seen[f"btc-updown-5m-{current}"] == "false"
+    assert seen[f"btc-updown-5m-{current + 300}"] == "false"
+    assert seen[f"btc-updown-5m-{current + 600}"] == "false"
+    assert seen[f"btc-updown-5m-{current - 300}"] == "true"
+    assert seen[f"btc-updown-5m-{current - 600}"] == "true"
+    assert seen[f"btc-updown-5m-{current - 900}"] == "true"

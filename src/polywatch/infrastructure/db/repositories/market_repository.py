@@ -251,6 +251,11 @@ class SqlAlchemyMarketRepository:
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
 
+    async def list_symbols(self) -> list[str]:
+        """Semua simbol aset yang sudah dikenal (port AssetSource, T-024)."""
+        result = await self._session.scalars(select(AssetModel.symbol).order_by(AssetModel.symbol))
+        return list(result.all())
+
 
 def _status_rank(column: InstrumentedAttribute[MarketStatus]) -> Case[Any]:
     """Ekspresi SQL rank status (upcoming=0 ... resolved=3) untuk kolom status.
