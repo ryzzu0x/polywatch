@@ -6,7 +6,11 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
-from polywatch.application.dto.market import PendingMarket, TokenMarketInfo
+from polywatch.application.dto.market import (
+    MarketResultEntry,
+    PendingMarket,
+    TokenMarketInfo,
+)
 from polywatch.application.dto.settings import WatchEntry
 from polywatch.application.dto.trade import ResolvedTrade
 from polywatch.domain.market import Market, MarketResult, MarketStatus, Timeframe
@@ -35,6 +39,35 @@ class MarketRepository(Protocol):
 
     async def list_pending_resolution(self, limit: int) -> Sequence[PendingMarket]:
         """Market CLOSED tanpa market_results, siap diproses record_result."""
+        ...
+
+
+class MarketStatsRepository(Protocol):
+    """Bacaan ringan untuk perintah bot /status dan /results (T-014/T-015).
+
+    Dipisah dari `MarketRepository` (interface segregation): use case bot
+    hanya butuh bacaan ini, dan fake test tidak perlu mengimplementasikan
+    seluruh port persistensi.
+    """
+
+    async def list_by_status(self, status: MarketStatus) -> Sequence[Market]: ...
+
+    async def count_by_status(self, status: MarketStatus) -> int:
+        """Jumlah market berstatus tertentu (untuk /status)."""
+        ...
+
+    async def latest_results(
+        self, asset: str, timeframe: Timeframe, limit: int
+    ) -> Sequence[MarketResultEntry]:
+        """Hasil market terbaru satu aset x timeframe (untuk /results)."""
+        ...
+
+
+class TradeStatsRepository(Protocol):
+    """Bacaan jumlah trade untuk /status (T-014)."""
+
+    async def count_since(self, since: datetime) -> int:
+        """Jumlah trade sejak waktu tertentu (untuk /status)."""
         ...
 
 

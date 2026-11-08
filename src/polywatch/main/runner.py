@@ -1,8 +1,13 @@
-"""Runner aplikasi: loop heartbeat + shutdown rapi.
+"""Runner aplikasi: bot long polling + loop heartbeat + shutdown rapi.
 
-Heartbeat memakai port `Clock` untuk menghitung uptime, bukan
-`datetime.now()` langsung. Interval dinyatakan dalam detik; test
-memakai nilai pecahan (mis. 0.01) supaya cepat.
+Satu proses menjalankan bersamaan:
+(a) long polling bot Telegram (bila `setup_bot` berhasil),
+(b) siklus heartbeat existing,
+(c) hook ingest trade bila terpasang (`ingest_hooks`) tanpa mengubah
+    perilaku bila kosong.
+
+SIGINT/SIGTERM membatalkan semua task lalu menutup container (session Bot +
+engine DB) lewat `aclose`.
 """
 
 from __future__ import annotations
@@ -33,14 +38,47 @@ async def _heartbeat_once(container: Container, started_at_monotonic: float) -> 
     )
 
 
+async def _run_ingest_hooks(container: Container, interval_sec: float) -> None:
+    """Jalankan hook ingest (bila ada) tiap interval — tanpa mengubah
+    perilaku runner bila tidak ada hook terpasang."""
+    if not container.ingest_hooks:
+        return
+    while True:
+        for hook in list(container.ingest_hooks):
+            try:
+                await hook()
+            except Exception:
+                logger.exception("hook ingest gagal", extra={"event": "ingest_hook_error"})
+        await asyncio.sleep(interval_sec)
+
+
+async def _poll_bot(container: Container) -> None:
+    """Long polling bot sampai dibatalkan (session Bot ditutup aclose)."""
+    from aiogram import Bot, Dispatcher
+
+    bot = container._bot
+    dispatcher = container._dispatcher
+    assert isinstance(bot, Bot)
+    assert isinstance(dispatcher, Dispatcher)
+    me = await bot.get_me()
+    logger.info(
+        "bot getMe sukses",
+        extra={"event": "bot_get_me", "bot_username": me.username},
+    )
+    with contextlib.suppress(asyncio.CancelledError):
+        # handle_signals=False: sinyal ditangani runner (satu tempat).
+        await dispatcher.start_polling(bot, handle_signals=False)
+
+
 async def run(
     container: Container,
     heartbeat_interval_sec: float = DEFAULT_HEARTBEAT_INTERVAL_SEC,
     stop_event: asyncio.Event | None = None,
 ) -> None:
-    """Jalankan loop heartbeat sampai sinyal berhenti.
+    """Jalankan bot + heartbeat + hook ingest sampai sinyal berhenti.
 
-    - SIGINT/SIGTERM memicu shutdown rapi.
+    - SIGINT/SIGTERM memicu shutdown rapi (semua task dibatalkan, container
+      ditutup).
     - `stop_event` memungkinkan test membatalkan loop tanpa sinyal.
     """
     if stop_event is None:
@@ -64,14 +102,41 @@ async def run(
             "heartbeat_interval_sec": heartbeat_interval_sec,
         },
     )
+    tasks: list[asyncio.Task[None]] = []
     try:
-        while not stop_event.is_set():
-            await _heartbeat_once(container, started_at)
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(stop_event.wait(), timeout=heartbeat_interval_sec)
+        # (a) long polling bot — dipasang bila dispatcher tersedia
+        if getattr(container, "_dispatcher", None) is not None:
+            tasks.append(asyncio.create_task(_poll_bot(container), name="bot-polling"))
+        # (b) heartbeat existing
+        tasks.append(
+            asyncio.create_task(
+                _heartbeat_loop(container, started_at, heartbeat_interval_sec, stop_event)
+            )
+        )
+        # (c) hook ingest (no-op bila kosong)
+        tasks.append(asyncio.create_task(_run_ingest_hooks(container, heartbeat_interval_sec)))
+
+        await stop_event.wait()
     finally:
         logger.info("runner stop", extra={"event": "runner_stop"})
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         for sig in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(NotImplementedError, ValueError):
                 loop.remove_signal_handler(sig)
         await container.aclose()
+
+
+async def _heartbeat_loop(
+    container: Container,
+    started_at: float,
+    interval_sec: float,
+    stop_event: asyncio.Event,
+) -> None:
+    """Loop heartbeat lama, dipecah agar bisa dibatalkan bersama bot."""
+    with contextlib.suppress(asyncio.CancelledError):
+        while not stop_event.is_set():
+            await _heartbeat_once(container, started_at)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), timeout=interval_sec)

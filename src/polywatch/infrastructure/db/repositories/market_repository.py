@@ -11,18 +11,23 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, cast
 
-from sqlalchemy import Case, case, exists, select, update
+from sqlalchemy import Case, case, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
-from polywatch.application.dto.market import PendingMarket, TokenMarketInfo
+from polywatch.application.dto.market import (
+    MarketResultEntry,
+    PendingMarket,
+    TokenMarketInfo,
+)
 from polywatch.domain.errors import InvalidMarketSlugError
 from polywatch.domain.market import (
     Market,
     MarketResult,
     MarketSlug,
     MarketStatus,
+    Timeframe,
 )
 from polywatch.infrastructure.db.models import (
     AssetModel,
@@ -115,6 +120,47 @@ class SqlAlchemyMarketRepository:
         result = await self._session.execute(stmt)
         rows = cast("Sequence[tuple[MarketModel, AssetModel]]", result.all())
         return [_to_domain(m) for m, _ in rows]
+
+    async def count_by_status(self, status: MarketStatus) -> int:
+        """Jumlah market berstatus tertentu (untuk /status)."""
+        stmt = select(func.count()).select_from(MarketModel).where(MarketModel.status == status)
+        return int(await self._session.scalar(stmt) or 0)
+
+    async def latest_results(
+        self, asset: str, timeframe: Timeframe, limit: int
+    ) -> Sequence[MarketResultEntry]:
+        """Hasil market terbaru satu aset x timeframe (untuk /results).
+
+        Join `markets` x `market_results` x `assets`, urut start_at terbaru,
+        dibatasi `limit`.
+        """
+        stmt = (
+            select(
+                MarketModel.slug,
+                MarketResultModel.result,
+                MarketResultModel.open_price,
+                MarketResultModel.close_price,
+                MarketResultModel.volume_usdc,
+                MarketModel.start_at,
+            )
+            .join(MarketResultModel, MarketResultModel.market_id == MarketModel.id)
+            .join(AssetModel, AssetModel.id == MarketModel.asset_id)
+            .where(AssetModel.symbol == asset, MarketModel.timeframe == timeframe)
+            .order_by(MarketModel.start_at.desc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return [
+            MarketResultEntry(
+                slug=row.slug,
+                result=row.result,
+                open_price=row.open_price,
+                close_price=row.close_price,
+                volume_usdc=row.volume_usdc,
+                start_at=row.start_at,
+            )
+            for row in result.all()
+        ]
 
     async def get_result(self, market_id: int) -> MarketResult | None:
         stmt = select(MarketResultModel).where(MarketResultModel.market_id == market_id)

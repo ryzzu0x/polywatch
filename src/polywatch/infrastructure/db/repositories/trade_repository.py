@@ -64,6 +64,11 @@ class SqlAlchemyTradeRepository:
         result = await self._session.execute(stmt)
         return len(result.scalars().all())
 
+    async def count_since(self, since: datetime) -> int:
+        """Jumlah trade sejak waktu tertentu (untuk /status)."""
+        stmt = select(func.count()).select_from(TradeModel).where(TradeModel.traded_at >= since)
+        return int(await self._session.scalar(stmt) or 0)
+
     async def last_traded_at(self, market_id: int) -> datetime | None:
         """Waktu trade terakhir market (untuk backfill sejak terakhir)."""
         stmt = select(func.max(TradeModel.traded_at)).where(TradeModel.market_id == market_id)

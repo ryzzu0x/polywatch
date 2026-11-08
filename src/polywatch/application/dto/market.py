@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from polywatch.domain.market import MarketStatus, Outcome
@@ -48,6 +49,23 @@ class PendingMarket:
     condition_id: str
     slug: str
     status: MarketStatus
+
+
+@dataclass(frozen=True, slots=True)
+class MarketResultEntry:
+    """Satu baris hasil market untuk tampilan /results (T-015).
+
+    `start_at` = waktu mulai market (identitas window), bukan resolved_at —
+    untuk pengguna, kapan window berjalan lebih informatif daripada kapan
+    resolusi resmi keluar.
+    """
+
+    slug: str
+    result: Outcome
+    open_price: Decimal
+    close_price: Decimal
+    volume_usdc: Decimal
+    start_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

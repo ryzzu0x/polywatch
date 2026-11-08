@@ -60,8 +60,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         sys.stdout.write("konfigurasi valid\n")
         return 0
-    asyncio.run(run(container, heartbeat_interval_sec=args.heartbeat_interval))
+    asyncio.run(_run_with_bot(container, heartbeat_interval_sec=args.heartbeat_interval))
     return 0
+
+
+async def _run_with_bot(container: Container, heartbeat_interval_sec: float) -> None:
+    """Rakit use case bot lalu jalankan runner (tidak menyentuh Telegram saat --check)."""
+    try:
+        await container.setup_bot()
+    except Exception:
+        # Bot gagal dirakit (mis. jaringan) tidak boleh menghentikan service;
+        # runner tetap jalan dengan heartbeat saja.
+        logger.exception(
+            "bot gagal dirakit; runner jalan tanpa bot", extra={"event": "bot_setup_failed"}
+        )
+    await run(container, heartbeat_interval_sec=heartbeat_interval_sec)
 
 
 if __name__ == "__main__":
