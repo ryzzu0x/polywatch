@@ -115,10 +115,7 @@ async def probe(
     subscribe_variants: bool,
 ) -> dict[str, Any]:
     token_to_slug = {
-        tok: m["slug"]
-        for m in markets
-        for tok in (m["clobTokenIds"] or [])
-        if isinstance(tok, str)
+        tok: m["slug"] for m in markets for tok in (m["clobTokenIds"] or []) if isinstance(tok, str)
     }
     all_tokens = list(token_to_slug)
     result: dict[str, Any] = {
@@ -146,7 +143,9 @@ async def probe(
             deadline = t0 + duration_s
             while time.monotonic() < deadline:
                 try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=min(5, deadline - time.monotonic()))
+                    raw = await asyncio.wait_for(
+                        ws.recv(), timeout=min(5, deadline - time.monotonic())
+                    )
                 except TimeoutError:
                     if time.monotonic() - last_rx > idle_timeout_s:
                         result["idle_timeout_hit"] = True
@@ -183,8 +182,14 @@ async def probe(
                             "type": ev_type,
                             "asset_id": asset,
                             "slug": token_to_slug.get(asset),
-                            "fields": sorted(k for k in msg if k not in ("bids", "asks", "buys", "sells")),
-                            "sample": {k: v for k, v in msg.items() if k not in ("bids", "asks", "buys", "sells")},
+                            "fields": sorted(
+                                k for k in msg if k not in ("bids", "asks", "buys", "sells")
+                            ),
+                            "sample": {
+                                k: v
+                                for k, v in msg.items()
+                                if k not in ("bids", "asks", "buys", "sells")
+                            },
                             "latency_ms": lat,
                         }
                     )
@@ -229,7 +234,9 @@ async def main() -> None:
 
     markets = await find_live_5m_markets(args.markets)
     if not markets:
-        print(json.dumps({"error": "tidak ada market updown 5m live ditemukan"}, ensure_ascii=False))
+        print(
+            json.dumps({"error": "tidak ada market updown 5m live ditemukan"}, ensure_ascii=False)
+        )
         return
     print(f"# market live: {[m['slug'] for m in markets]}", flush=True)
 
@@ -254,9 +261,6 @@ async def main() -> None:
     if args.compare_data_api:
         for m in markets[:1]:
             trades = await fetch_data_api_trades(m["conditionId"])
-            ws_hashes = {
-                json.dumps(ev["sample"], sort_keys=True) for ev in probe_res["events"]
-            }
             ltp = [e for e in probe_res["events"] if e["type"] == "last_trade_price"]
             output["data_api_compare"] = {
                 "slug": m["slug"],

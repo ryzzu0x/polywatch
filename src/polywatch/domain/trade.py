@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from polywatch.domain.errors import InvalidWalletError
+from polywatch.domain.errors import InvalidWalletError, OversellError
 from polywatch.domain.market import Outcome
 
 _WALLET_PATTERN = re.compile(r"0x[0-9a-f]{40}")
@@ -67,3 +67,70 @@ class Position:
     def is_two_sided(self) -> bool:
         """Memegang kedua sisi sekaligus — ciri market maker."""
         return self.net_up > 0 and self.net_down > 0
+
+
+def apply_trade(position: Position, trade: Trade) -> Position:
+    """Terapkan satu trade ke posisi, kembalikan posisi baru.
+
+    BUY menambah `net_*` dan `cost_*` (biaya akumulasi harga masuk). SELL
+    mengurangi `net_*` saja — `cost_*` tetap menjadi dasar PnL posisi yang masih
+    terbuka (average entry dihitung berbobot size, ADR-003). SELL melebihi
+    posisi ditolak `OversellError`.
+    """
+    if (trade.wallet, trade.market_id) != (position.wallet, position.market_id):
+        raise ValueError(
+            "trade tidak cocok dengan posisi: "
+            f"({trade.wallet}, {trade.market_id}) != ({position.wallet}, {position.market_id})"
+        )
+    net = position.net_up if trade.outcome is Outcome.UP else position.net_down
+    if trade.action is Action.SELL and trade.size > net:
+        raise OversellError(trade.wallet, trade.market_id, trade.outcome, trade.size, net)
+    delta_net = trade.size if trade.action is Action.BUY else -trade.size
+    delta_cost = trade.usdc if trade.action is Action.BUY else Decimal(0)
+    if trade.outcome is Outcome.UP:
+        return replace(
+            position,
+            net_up=position.net_up + delta_net,
+            cost_up=position.cost_up + delta_cost,
+        )
+    return replace(
+        position,
+        net_down=position.net_down + delta_net,
+        cost_down=position.cost_down + delta_cost,
+    )
+
+
+def positions_from_trades(trades: list[Trade]) -> dict[tuple[str, int], Position]:
+    """Agregasi daftar trade menjadi posisi bersih per (wallet, market_id).
+
+    Posisi dimulai nol; trade diproses berurutan (urutan list = urutan waktu).
+    """
+    positions: dict[tuple[str, int], Position] = {}
+    for trade in trades:
+        key = (trade.wallet, trade.market_id)
+        base = positions.get(key) or Position(wallet=trade.wallet, market_id=trade.market_id)
+        positions[key] = apply_trade(base, trade)
+    return positions
+
+
+def realize(position: Position, result: Outcome) -> Decimal:
+    """PnL posisi bersih saat market resolve: sisi menang bernilai 1, kalah 0.
+
+    Pendapatan = net sisi menang; biaya = total cost kedua sisi (posisi sisi
+    kalah hangus). Bisa negatif (rugi).
+    """
+    winnings = position.net_up if result is Outcome.UP else position.net_down
+    return winnings - position.cost_up - position.cost_down
+
+
+def average_entry(position: Position) -> Decimal | None:
+    """Harga masuk rata-rata berbobot size untuk sisi dengan posisi tersisa.
+
+    Kembalikan None bila tidak ada posisi terbuka di kedua sisi. Bila dua sisi
+    terbuka (market maker), dipakai sisi dengan net terbesar.
+    """
+    if position.net_up > 0 and position.net_up >= position.net_down:
+        return position.cost_up / position.net_up
+    if position.net_down > 0:
+        return position.cost_down / position.net_down
+    return None

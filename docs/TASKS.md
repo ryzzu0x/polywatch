@@ -52,7 +52,8 @@
 
 ## M2 — Ingest Trade & Skor Wallet (F3, F4)
 
-- [ ] **T-010 · Domain Trade & Position** — S
+- [x] **T-010 · Domain Trade & Position** — S
+  - `apply_trade` (BUY/SELL, tolak oversell), `positions_from_trades`, `realize` (PnL resolve), `average_entry` berbobot size; error domain `OversellError`
   - *Selesai jika:* unit test posisi bersih (buy/sell parsial, dua sisi) lulus
 - [ ] **T-011 · Data API client + `ingest_trades` idempoten** — M
   - Cursor per market, backoff, batch insert
@@ -125,3 +126,4 @@
 | 2026-11-08 | T-008 | Selesai | WatchConfigRepository PostgreSQL (upsert ON CONFLICT uq_watch_config) + UserRepository (get_or_create idempoten) + use case manage_settings (set_watch_enabled/list_watch/enabled_assets; validasi domain, aset harus terdaftar); test filter enabled membuktikan market yang dinonaktifkan tidak diproses siklus berikutnya |
 | 2026-11-08 | T-009 | Selesai | PolymarketPriceSource (crypto-price Chainlink) + BinancePriceSource (klines 1m) cadangan, use case record_result (poll 30s, timeout 15 mnt → notifikasi owner sekali per market, outcome dari outcomePrices, price_source selalu terisi, idempoten), TelegramNotifier; verifikasi runtime 50 sampel ditunda ke QA T-022 |
 | 2026-11-08 | T-005b | Selesai | Spike CLOB WS market channel: subscribe `{"assets_ids":[...],"type":"market"}` ok (PING/PONG); latency median ~81 ms / p90 ~85 ms / max 592 ms (49.422 event, 3 run 5,5 mnt); `last_trade_price` memuat tx_hash/price/size/side/timestamp TAPI TANPA alamat wallet → WS cukup untuk harga real-time & detector, wallet tetap lewat Data API/on-chain; close 1000 "all subscribed assets resolved" → reconnect wajib; ADR-004 diperbarui; laporan `docs/spikes/T-005b-websocket.md` |
+| 2026-11-08 | T-010 | Selesai | Domain agregasi Trade → Position: `apply_trade` (BUY tambah net+cost, SELL kurangi net tanpa ubah cost, tolak oversell via `OversellError`), `positions_from_trades` per (wallet, market_id), `realize` PnL (menang 1/kalah 0), `average_entry` berbobot size (dua sisi → net terbesar); 22 unit test baru (167 total) |

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 
 class DomainError(Exception):
     """Kesalahan aturan bisnis."""
@@ -54,3 +56,24 @@ class InvalidResolutionStatusError(DomainError):
     def __init__(self, raw: object) -> None:
         super().__init__(f"umaResolutionStatus tidak dikenal: {raw!r}")
         self.raw = raw
+
+
+class OversellError(DomainError):
+    """SELL melebihi posisi bersih yang dimiliki wallet di market tersebut."""
+
+    def __init__(
+        self,
+        wallet: str,
+        market_id: int,
+        outcome: str,
+        size: Decimal,
+        net: Decimal,
+    ) -> None:
+        super().__init__(
+            f"jual {size} {outcome} melebihi posisi {net} wallet {wallet} di market {market_id}"
+        )
+        self.wallet = wallet
+        self.market_id = market_id
+        self.outcome = outcome
+        self.size = size
+        self.net = net
