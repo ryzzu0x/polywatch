@@ -5,6 +5,45 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Fixed — T-027 (alert palsu health monitor + instance ganda)
+- **Bug 1 (dua instance berjalan bersamaan):** dua HealthMonitor
+  mengirim alert ganda ke owner dan polling Telegram saling mengganggu
+  (`TelegramConflictError: terminated by other getUpdates request`,
+  log lama tryings=391). **Perbaikan (ADR-014):** single-instance lock
+  `fcntl.flock` eksklusif non-blocking pada `LOCK_FILE` (default temp
+  dir) saat start — lock kedua gagal → log `another_instance_running`
+  + exit code 3 tanpa menyentuh Telegram/DB; flock dilepas kernel
+  otomatis saat proses mati.
+- **Bug 2 (urutan perakitan):** `main/cli.py` memanggil
+  `setup_scheduler()` SEBELUM `setup_health()` — saat task scheduler
+  dibuat `container.health_monitor` masih `None` →
+  `create_scheduler_tasks(monitor=None)` → `record_cycle` tidak pernah
+  dipanggil → discover/result selamanya dinilai "belum ada aktivitas"
+  → alarm palsu. **Perbaikan:** urutan dibalik — `setup_health()`
+  sebelum `setup_scheduler()`/`setup_ingest()`; test kontrak baru
+  membuktikan `record_cycle` benar-benar terpanggil lewat container
+  nyata dengan urutan CLI.
+- **Bug 3 (metrik kesegaran ingest salah):** ingest diukur dari
+  `max(traded_at)` market LIVE (`last_trade_at_live`) — jendela 5m baru
+  tanpa trade atau pasar sepi → `None` → alarm padahal ingest sehat;
+  ambang 120 dtk terlalu ketat. **Perbaikan (ADR-014):** kesegaran
+  ingest = heartbeat — `IngestTrades.on_heartbeat` melaporkan
+  `record_cycle("ingest", ok)` saat langganan WS dimulai, per event WS
+  (throttle 60 dtk), dan tiap akhir siklus stream; ambang
+  `STALE_INGEST_S` 120→600 dtk. Alarm ingest hanya bila ada market
+  LIVE (`live_market_count() > 0`, method baru port
+  `HealthActivityRepository`); pesan menyebut angka nyata ("tidak ada
+  heartbeat ingest 10 menit (batch terakhir: ..., market live: 17)");
+  `last_trade_at_live` menjadi info tambahan, bukan pemicu.
+- **Anti-spam antar-restart:** state terakhir notifikasi disimpan di
+  `HEALTH_STATE_FILE` (JSON kecil, tulis atomic) — restart berulang
+  dalam cooldown 10 menit tidak mengirim ulang alarm (ADR-014).
+- **Noise log:** logger `httpx`/`httpcore` di-redam ke WARNING —
+  sebelumnya tiap request Gamma/RPC ditulis INFO dan membanjiri
+  journald.
+- Bukti run nyata (satu instance, 6.4 menit): 0 `health_stale` ke
+  Telegram, ingest aktif (90 token / 45 market LIVE), +1246 baris
+  trade tersimpan. 356 → 376 test.
 ### Fixed — T-026 (ingest trade tidak pernah berjalan, `trades` tetap 0)
 - **Bug 1 (semantik watch):** `SqlAlchemyLiveTokenQuery` INNER JOIN
   `watch_config enabled=true`, sedangkan tabel `watch_config` kosong
