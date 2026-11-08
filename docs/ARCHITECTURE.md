@@ -118,10 +118,10 @@ Catatan:
 | `/status` | Market live terakhir, jumlah market per status, trade 24 jam, status WS/RPC, versi | owner |
 | `/markets` | Daftar aset × timeframe + tombol inline toggle on/off (callback query) | owner |
 | `/results <aset> <5m\|15m> [n]` | Hasil market terakhir (open, close, Up/Down, volume, waktu; n ≤ 20) | owner |
-| `/top [n]` | Wallet skor tertinggi | owner |
-| `/wallet <alamat>` | Statistik wallet | owner |
-| `/watch <alamat>` · `/unwatch <alamat>` | Kelola watchlist | owner |
-| `/alerts` | Atur skor minimal, size minimal, cooldown, on/off | owner |
+| `/top [n]` | Wallet skor tertinggi (default 10, maks 25; skor, edge, ROI, jumlah market, win rate; tanpa market maker) | owner |
+| `/wallet <alamat>` | Statistik satu wallet: skor, edge, ROI, PnL, jumlah market, win rate, status MM, status watchlist | owner |
+| `/watch <alamat>` · `/unwatch <alamat>` | Kelola watchlist (idempoten) | owner |
+| `/alerts` | Atur skor minimal, size minimal, cooldown, on/off — tombol inline (skor 50/60/70/80, size $50/$100/$500, cooldown 1/5/15 mnt) | owner |
 | v2: `/wallet_me`, `/deposit`, `/copy`, `/limits`, `/stop`, `/export_key` | Wallet & eksekusi | per pengguna |
 
 Error ditampilkan ke pengguna sebagai pesan singkat; detail (kode + trace id) masuk log.

@@ -5,6 +5,31 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Added (T-016, T-017)
+- `/top [n]` (default 10, maks 25): wallet skor tertinggi dari
+  `wallet_stats` tanpa market maker — skor, edge, ROI, jumlah market,
+  win rate. `/wallet <alamat>`: statistik satu wallet (skor, edge, ROI,
+  PnL, jumlah market, win rate, status MM, status watchlist); alamat
+  divalidasi `normalize_wallet` dengan pesan ramah saat salah format.
+- `/watch` / `/unwatch <alamat>`: kelola tabel `watchlist` lewat port
+  baru `WatchlistRepository` (add/remove/list/is_watched), idempoten
+  dengan balasan singkat.
+- Use case `evaluate_alert` (dipanggil dari hook `on_saved`
+  `ingest_trades`): cek `is_alertable` (sampel cukup, bukan market
+  maker), skor ≥ min_score (wallet di watchlist tetap terkirim dengan
+  prefix `[WATCHLIST]`), size ≥ min_usdc, cooldown per (user, wallet)
+  default 300 dtk; setiap alert dicatat ke `alerts_sent` dengan
+  `delay_ms` = selisih `traded_at` → waktu kirim.
+- Formatter alert Bahasa Indonesia ringkas: market slug, wallet pendek
+  `0xabab…abab`, skor & edge wallet, aksi beli/jual Up/Down, size USDC,
+  harga, link market.
+- `/alerts`: tampil & ubah pengaturan alert (`alert_settings`) dengan
+  tombol inline — skor 50/60/70/80, size $50/$100/$500, cooldown
+  1/5/15 mnt, on/off — lewat use case `manage_alerts` + port
+  `AlertSettingsRepository`/`AlertsSentRepository` (impl PostgreSQL).
+- Container merakit hook `on_saved → evaluate_alert` (`setup_ingest`);
+  tanpa hook, perilaku ingest/runner tidak berubah. 254 → 291 test.
+
 ### Added (T-014, T-015)
 - Bot Telegram aiogram 3: middleware guard owner-only (chat selain
   owner ditolak satu baris generik), `/start`, `/status` (market live
@@ -158,6 +183,31 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 - `TEST_DATABASE_URL` di `.env.example` (placeholder password).
 
 ## [Unreleased]
+
+### Added (T-016, T-017)
+- `/top [n]` (default 10, maks 25): wallet skor tertinggi dari
+  `wallet_stats` tanpa market maker — skor, edge, ROI, jumlah market,
+  win rate. `/wallet <alamat>`: statistik satu wallet (skor, edge, ROI,
+  PnL, jumlah market, win rate, status MM, status watchlist); alamat
+  divalidasi `normalize_wallet` dengan pesan ramah saat salah format.
+- `/watch` / `/unwatch <alamat>`: kelola tabel `watchlist` lewat port
+  baru `WatchlistRepository` (add/remove/list/is_watched), idempoten
+  dengan balasan singkat.
+- Use case `evaluate_alert` (dipanggil dari hook `on_saved`
+  `ingest_trades`): cek `is_alertable` (sampel cukup, bukan market
+  maker), skor ≥ min_score (wallet di watchlist tetap terkirim dengan
+  prefix `[WATCHLIST]`), size ≥ min_usdc, cooldown per (user, wallet)
+  default 300 dtk; setiap alert dicatat ke `alerts_sent` dengan
+  `delay_ms` = selisih `traded_at` → waktu kirim.
+- Formatter alert Bahasa Indonesia ringkas: market slug, wallet pendek
+  `0xabab…abab`, skor & edge wallet, aksi beli/jual Up/Down, size USDC,
+  harga, link market.
+- `/alerts`: tampil & ubah pengaturan alert (`alert_settings`) dengan
+  tombol inline — skor 50/60/70/80, size $50/$100/$500, cooldown
+  1/5/15 mnt, on/off — lewat use case `manage_alerts` + port
+  `AlertSettingsRepository`/`AlertsSentRepository` (impl PostgreSQL).
+- Container merakit hook `on_saved → evaluate_alert` (`setup_ingest`);
+  tanpa hook, perilaku ingest/runner tidak berubah. 254 → 291 test.
 
 ### Added (T-014, T-015)
 - Bot Telegram aiogram 3: middleware guard owner-only (chat selain
