@@ -467,3 +467,41 @@ async def test_run_loop_gagal_query_token_tetap_hidup() -> None:
     await asyncio.gather(ingest.run(stop), _stop_after_two())
     # kegagalan query kedua tidak mematikan loop — siklus tetap lanjut
     assert len(stream.stream_calls) == 2
+
+
+async def test_run_loop_commit_per_batch() -> None:
+    """T-026: on_batch_commit dipanggil tiap batch tersimpan — stream
+    kontinyu tidak pernah berakhir, commit tidak boleh menunggu akhir siklus."""
+    stream = RestartableFakeStream([_event("0xtx1")])
+    commits: list[int] = []
+
+    async def _commit_counter() -> None:
+        commits.append(1)
+
+    ingest = IngestTrades(
+        stream=stream,
+        receipts=FakeReceipts(
+            {"0xtx1": [_fill("0xtx1", WALLET_A, WALLET_B, side=0, token_id=111)]}
+        ),
+        trades=FakeTradeRepository(),
+        markets=FakeMarketRepository({7: MARKET}),
+        clock=FakeClock(),
+        token_markets=[MARKET],
+        on_batch_commit=_commit_counter,
+        live_refresh_sec=0.01,
+        sleep=_sleep_noop,
+    )
+
+    # hentikan setelah stream pertama berakhir (event tunggal tersimpan)
+    stop = asyncio.Event()
+
+    async def _stop_after_first() -> None:
+        for _ in range(500):
+            if len(stream.stream_calls) >= 1 and commits:
+                break
+            await asyncio.sleep(0.001)
+        stop.set()
+
+    # run() dengan token statis (tanpa live_tokens) — satu siklus lalu stop
+    await asyncio.gather(ingest.run(stop), _stop_after_first())
+    assert commits == [1]  # batch tersimpan → commit langsung, bukan di akhir

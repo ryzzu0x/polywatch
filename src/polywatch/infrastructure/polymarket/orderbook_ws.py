@@ -194,6 +194,8 @@ class OrderbookWsClient:
         ping_task = asyncio.create_task(self._heartbeat(ws))
         try:
             while True:
+                if self._stopping.is_set():
+                    return
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=RECV_TIMEOUT_S)
                 except TimeoutError:
@@ -211,7 +213,7 @@ class OrderbookWsClient:
                     yield event
         finally:
             ping_task.cancel()
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await ping_task
 
     async def _heartbeat(self, ws: websockets.ClientConnection) -> None:

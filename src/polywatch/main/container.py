@@ -264,6 +264,7 @@ class Container:
         T-023: repository aktivitas dibuat per-cek (session per-task) —
         tidak ada session bersama dengan handler bot.
         """
+        from polywatch.application.use_cases.health_monitor import HealthMonitor
         from polywatch.infrastructure.db.repositories.trade_repository import (
             SqlAlchemyTradeRepository,
         )
@@ -568,18 +569,21 @@ class Container:
         container = self
 
         class _ScopedLiveTokens:
-            """Adapter LiveTokenSource: session per-panggilan + release."""
+            """Adapter LiveTokenSource: session sekali-pakai per panggilan.
+
+            Tidak boleh memakai scoped session task ingest — `release_session`
+            akan menutup session yang sedang dipakai repo trade (T-023).
+            Query token live ringan dan read-only; session baru dari factory
+            dipakai sekali lalu ditutup.
+            """
 
             async def live_tokens(
                 self, timeframes: Sequence[Timeframe] | None = None
             ) -> Sequence[TokenMarketInfo]:
-                try:
-                    session = container.scoped_session()
+                async with container.session_factory() as session:
                     query = SqlAlchemyLiveTokenQuery(session)
                     wanted = list(timeframes) if timeframes else list(Timeframe)
                     return list(await query.live_tokens(wanted))
-                finally:
-                    await container.release_session()
 
         async def run_ingest() -> None:
             """Loop ingest kontinyu (T-026) — dipanggil sekali oleh runner."""
@@ -592,6 +596,7 @@ class Container:
                     clock=self.clock,
                     live_tokens=_ScopedLiveTokens(),
                     on_saved=on_saved,
+                    on_batch_commit=self._session_commit,
                 )
                 logger.info(
                     "loop ingest kontinyu dimulai",

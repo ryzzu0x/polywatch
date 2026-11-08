@@ -100,6 +100,7 @@ class IngestTrades:
         max_cache_tx: int = DEFAULT_MAX_CACHE_TX,
         live_refresh_sec: float = DEFAULT_LIVE_REFRESH_SEC,
         sleep: Callable[[float], Awaitable[None]] | None = None,
+        on_batch_commit: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._stream = stream
         self._receipts = receipts
@@ -113,6 +114,7 @@ class IngestTrades:
         self._max_cache_tx = max_cache_tx
         self._live_refresh_sec = live_refresh_sec
         self._sleep = sleep or asyncio.sleep
+        self._on_batch_commit = on_batch_commit
         self._seen_tx: set[str] = set()
 
     async def run(self, stop_event: asyncio.Event | None = None) -> None:
@@ -244,8 +246,13 @@ class IngestTrades:
         saved = await self._trades.insert_many(trades)
         stats.trades_saved += saved
         stats.latency_ms.append((now.timestamp() - received_at) * 1000)
-        if saved > 0 and self._on_saved is not None:
-            await self._on_saved(trades)
+        if saved > 0:
+            if self._on_batch_commit is not None:
+                # commit per batch (T-026): stream kontinyu tidak pernah
+                # "berakhir", jadi commit tidak boleh menunggu akhir siklus.
+                await self._on_batch_commit()
+            if self._on_saved is not None:
+                await self._on_saved(trades)
 
     async def backfill(self, market_id: int, since: datetime | None = None) -> int:
         """Tutup gap trade market lewat Data API v2 (jalur lambat, 164 s).
