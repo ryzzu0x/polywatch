@@ -84,6 +84,87 @@ class Container:
     manage_watchlist: ManageWatchlist | None = field(default=None, repr=False)
     manage_alerts: ManageAlerts | None = field(default=None, repr=False)
     ingest_hooks: list[Any] = field(default_factory=list, repr=False)
+    discover_cycle: Any | None = field(default=None, repr=False)
+    record_result_cycle: Any | None = field(default=None, repr=False)
+    recompute_cycle: Any | None = field(default=None, repr=False)
+
+    def setup_scheduler(self) -> None:
+        """Rakit use case siklus penuh untuk scheduler (T-018 wiring).
+
+        DiscoverMarkets (Gamma), RecordResult (Gamma + harga), dan
+        RecomputeScores dipasang di sini; runner menjalankan loop periodiknya.
+        Hook on_saved ingest (alert) tetap dipasang lewat `setup_ingest`.
+        """
+        from polywatch.application.use_cases.discover_markets import DiscoverMarkets
+        from polywatch.application.use_cases.recompute_scores import RecomputeScores
+        from polywatch.application.use_cases.record_result import RecordResult
+        from polywatch.infrastructure.db.repositories.market_repository import (
+            SqlAlchemyMarketRepository,
+        )
+        from polywatch.infrastructure.db.repositories.trade_repository import (
+            SqlAlchemyTradeRepository,
+        )
+        from polywatch.infrastructure.db.repositories.wallet_stats_repository import (
+            SqlAlchemyWalletStatsRepository,
+        )
+        from polywatch.infrastructure.polymarket.gamma_client import GammaMarketSource
+        from polywatch.infrastructure.prices.binance_price_source import BinancePriceSource
+        from polywatch.infrastructure.prices.polymarket_price_source import (
+            PolymarketPriceSource,
+        )
+
+        gamma = GammaMarketSource(base_url=self.settings.polymarket_gamma_url)
+
+        async def run_discover() -> Any:
+            session = self.session_factory()
+            try:
+                discover = DiscoverMarkets(
+                    source=gamma,
+                    repository=SqlAlchemyMarketRepository(session),
+                    clock=self.clock,
+                )
+                summary = await discover.execute()
+                await session.commit()
+                return summary
+            finally:
+                await session.close()
+
+        async def run_record_result() -> Any:
+            session = self.session_factory()
+            try:
+                record = RecordResult(
+                    source=gamma,
+                    repository=SqlAlchemyMarketRepository(session),
+                    primary_price=PolymarketPriceSource(),
+                    fallback_price=BinancePriceSource(),
+                    clock=self.clock,
+                )
+                summaries = await record.execute()
+                await session.commit()
+                return summaries
+            finally:
+                await session.close()
+
+        async def run_recompute(market_id: int) -> Any:
+            session = self.session_factory()
+            try:
+                recompute = RecomputeScores(
+                    trades=SqlAlchemyTradeRepository(session),
+                    wallet_stats=SqlAlchemyWalletStatsRepository(session),
+                )
+                summary = await recompute.execute(market_id)
+                await session.commit()
+                return summary
+            finally:
+                await session.close()
+
+        self.discover_cycle = run_discover
+        self.record_result_cycle = run_record_result
+        self.recompute_cycle = run_recompute
+        logger.info(
+            "use case scheduler dirakit",
+            extra={"event": "container_scheduler_setup", "version": __version__},
+        )
 
     @classmethod
     def build(cls, settings: Settings) -> Container:

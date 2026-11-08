@@ -1,9 +1,11 @@
-"""Runner aplikasi: bot long polling + loop heartbeat + shutdown rapi.
+"""Runner aplikasi: bot long polling + scheduler + loop heartbeat + shutdown rapi.
 
 Satu proses menjalankan bersamaan:
 (a) long polling bot Telegram (bila `setup_bot` berhasil),
-(b) siklus heartbeat existing,
-(c) hook ingest trade bila terpasang (`ingest_hooks`) tanpa mengubah
+(b) scheduler siklus penuh (discover, record_result, recompute_scores —
+    bila `setup_scheduler` dipanggil),
+(c) siklus heartbeat existing,
+(d) hook ingest trade bila terpasang (`ingest_hooks`) tanpa mengubah
     perilaku bila kosong.
 
 SIGINT/SIGTERM membatalkan semua task lalu menutup container (session Bot +
@@ -20,6 +22,7 @@ from types import FrameType
 
 from polywatch import __version__
 from polywatch.main.container import Container
+from polywatch.main.scheduler import cancel_all, create_scheduler_tasks
 
 logger = logging.getLogger("polywatch.runner")
 
@@ -52,8 +55,23 @@ async def _run_ingest_hooks(container: Container, interval_sec: float) -> None:
         await asyncio.sleep(interval_sec)
 
 
+def _start_scheduler(container: Container, stop_event: asyncio.Event) -> list[asyncio.Task[None]]:
+    """Buat task scheduler bila use case siklus sudah dirakit; kosong bila belum."""
+    discover = getattr(container, "discover_cycle", None)
+    record_result = getattr(container, "record_result_cycle", None)
+    recompute = getattr(container, "recompute_cycle", None)
+    if discover is None or record_result is None or recompute is None:
+        return []
+    return create_scheduler_tasks(
+        discover=discover,
+        record_result=record_result,
+        recompute=recompute,
+        settings=container.settings,
+        stop_event=stop_event,
+    )
+
+
 async def _poll_bot(container: Container) -> None:
-    """Long polling bot sampai dibatalkan (session Bot ditutup aclose)."""
     from aiogram import Bot, Dispatcher
 
     bot = container._bot
@@ -107,18 +125,21 @@ async def run(
         # (a) long polling bot — dipasang bila dispatcher tersedia
         if getattr(container, "_dispatcher", None) is not None:
             tasks.append(asyncio.create_task(_poll_bot(container), name="bot-polling"))
-        # (b) heartbeat existing
+        # (b) scheduler siklus penuh (no-op bila use case belum dirakit)
+        scheduler_tasks = _start_scheduler(container, stop_event)
+        # (c) heartbeat existing
         tasks.append(
             asyncio.create_task(
                 _heartbeat_loop(container, started_at, heartbeat_interval_sec, stop_event)
             )
         )
-        # (c) hook ingest (no-op bila kosong)
+        # (d) hook ingest (no-op bila kosong)
         tasks.append(asyncio.create_task(_run_ingest_hooks(container, heartbeat_interval_sec)))
 
         await stop_event.wait()
     finally:
         logger.info("runner stop", extra={"event": "runner_stop"})
+        await cancel_all(scheduler_tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

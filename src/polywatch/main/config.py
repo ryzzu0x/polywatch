@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     database_url: SecretStr = Field(alias="DATABASE_URL")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
+    #: Interval scheduler (detik) — siklus penuh discover/resolve/skor.
+    discover_interval_s: float = Field(default=30.0, alias="DISCOVER_INTERVAL_S")
+    result_interval_s: float = Field(default=30.0, alias="RESULT_INTERVAL_S")
+    heartbeat_interval_s: float = Field(default=60.0, alias="HEARTBEAT_INTERVAL_S")
+
     polymarket_gamma_url: str = Field(
         default="https://gamma-api.polymarket.com", alias="POLYMARKET_GAMMA_URL"
     )

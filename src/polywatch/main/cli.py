@@ -13,7 +13,7 @@ from polywatch import __version__
 from polywatch.main.config import Settings
 from polywatch.main.container import Container
 from polywatch.main.logging import configure_logging
-from polywatch.main.runner import DEFAULT_HEARTBEAT_INTERVAL_SEC, run
+from polywatch.main.runner import run
 
 logger = logging.getLogger("polywatch")
 
@@ -24,11 +24,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--heartbeat-interval",
         type=float,
-        default=DEFAULT_HEARTBEAT_INTERVAL_SEC,
-        help="interval heartbeat dalam detik (default: 60)",
+        default=None,
+        help="interval heartbeat dalam detik (default: HEARTBEAT_INTERVAL_S/60)",
     )
     parser.add_argument("--version", action="version", version=f"polywatch {__version__}")
     return parser.parse_args(argv)
+
+
+def _heartbeat_interval(args: argparse.Namespace, settings: Settings) -> float:
+    if args.heartbeat_interval is not None:
+        return float(args.heartbeat_interval)
+    return max(float(settings.heartbeat_interval_s), 0.0)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -60,19 +66,31 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         sys.stdout.write("konfigurasi valid\n")
         return 0
-    asyncio.run(_run_with_bot(container, heartbeat_interval_sec=args.heartbeat_interval))
+    heartbeat = _heartbeat_interval(args, settings)
+    asyncio.run(_run_with_bot(container, heartbeat_interval_sec=heartbeat))
     return 0
 
 
 async def _run_with_bot(container: Container, heartbeat_interval_sec: float) -> None:
-    """Rakit use case bot lalu jalankan runner (tidak menyentuh Telegram saat --check)."""
+    """Rakit use case bot + scheduler lalu jalankan runner (tidak menyentuh
+    Telegram saat --check)."""
     try:
         await container.setup_bot()
     except Exception:
         # Bot gagal dirakit (mis. jaringan) tidak boleh menghentikan service;
-        # runner tetap jalan dengan heartbeat saja.
+        # runner tetap jalan dengan heartbeat + scheduler saja.
         logger.exception(
             "bot gagal dirakit; runner jalan tanpa bot", extra={"event": "bot_setup_failed"}
+        )
+    try:
+        container.setup_scheduler()
+        container.setup_ingest()
+    except Exception:
+        # Scheduler/ingest gagal dirakit tidak boleh menghentikan service;
+        # siklus yang gagal di-log terstruktur (T-019 notifikasi menyusul).
+        logger.exception(
+            "scheduler/ingest gagal dirakit; runner jalan tanpa siklus",
+            extra={"event": "scheduler_setup_failed"},
         )
     await run(container, heartbeat_interval_sec=heartbeat_interval_sec)
 
