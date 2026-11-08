@@ -31,4 +31,6 @@ class TradeSource(Protocol):
 class PriceSource(Protocol):
     """Sumber harga open/close untuk market yang sudah selesai."""
 
+    name: str
+
     async def open_close(self, slug: str) -> tuple[Decimal, Decimal] | None: ...

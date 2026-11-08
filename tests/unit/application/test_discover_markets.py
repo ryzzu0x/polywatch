@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from polywatch.application.dto.market import MarketSnapshot
+from polywatch.application.dto.market import MarketSnapshot, PendingMarket
 from polywatch.application.use_cases.discover_markets import DiscoverMarkets
 from polywatch.domain.market import Market, MarketSlug, MarketStatus, Timeframe
 
@@ -54,6 +54,21 @@ class FakeRepository:
 
     async def list_by_status(self, status: MarketStatus) -> Sequence[Market]:
         return [m for m in self.by_condition.values() if m.status is status]
+
+    async def get_result(self, market_id: int) -> None:
+        return None
+
+    async def save_result(self, result: object) -> None:
+        return None
+
+    async def update_status(self, market_id: int, status: MarketStatus) -> None:
+        return None
+
+    async def has_result(self, market_id: int) -> bool:
+        return False
+
+    async def list_pending_resolution(self, limit: int) -> Sequence[PendingMarket]:
+        return []
 
 
 def _snapshot(slug: str, condition_id: str, volume: str = "10") -> MarketSnapshot:

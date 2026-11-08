@@ -25,7 +25,12 @@ import httpx
 
 from polywatch.application.dto.market import MarketResultSnapshot, MarketSnapshot
 from polywatch.domain.errors import InvalidMarketSlugError
-from polywatch.domain.market import MarketSlug, Timeframe, validate_uma_resolution_status
+from polywatch.domain.market import (
+    MarketSlug,
+    Timeframe,
+    outcome_from_outcome_prices,
+    validate_uma_resolution_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +178,8 @@ class GammaMarketSource:
 
         Sesuai T-005: market hilang dari `?slug=` beberapa menit setelah end,
         tapi dengan `&closed=true` tetap muncul lengkap dengan hasil resolusi.
-        Market belum resolved mengembalikan None.
+        Market belum resolved mengembalikan None. `outcome` dipetakan dari
+        `outcomePrices` (resolusi resmi = sumber kebenaran).
         """
         params = {"slug": slug, "closed": "true"}
         page = await self._get_markets_page(params)
@@ -188,14 +194,23 @@ class GammaMarketSource:
         if not validate_uma_resolution_status(payload.get("umaResolutionStatus")):
             return None
         try:
+            outcome = outcome_from_outcome_prices(payload["outcomePrices"])
+        except KeyError:
+            logger.warning(
+                "payload hasil market tanpa outcomePrices, di-skip",
+                extra={"slug": payload.get("slug")},
+            )
+            return None
+        try:
             return MarketResultSnapshot(
                 slug=str(payload["slug"]),
                 open_price=None,
                 close_price=None,
                 volume_usdc=Decimal(str(payload.get("volume") or "0")),
                 resolved=True,
+                outcome=outcome,
             )
-        except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
+        except (InvalidOperation, TypeError, ValueError) as exc:
             logger.warning(
                 "payload hasil market rusak, di-skip",
                 extra={"slug": payload.get("slug"), "error": str(exc)},

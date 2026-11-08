@@ -11,14 +11,24 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, cast
 
-from sqlalchemy import Case, case, select
+from sqlalchemy import Case, case, exists, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
+from polywatch.application.dto.market import PendingMarket
 from polywatch.domain.errors import InvalidMarketSlugError
-from polywatch.domain.market import Market, MarketSlug, MarketStatus
-from polywatch.infrastructure.db.models import AssetModel, MarketModel
+from polywatch.domain.market import (
+    Market,
+    MarketResult,
+    MarketSlug,
+    MarketStatus,
+)
+from polywatch.infrastructure.db.models import (
+    AssetModel,
+    MarketModel,
+    MarketResultModel,
+)
 
 _STATUS_RANK: dict[MarketStatus, int] = {
     MarketStatus.UPCOMING: 0,
@@ -105,6 +115,70 @@ class SqlAlchemyMarketRepository:
         result = await self._session.execute(stmt)
         rows = cast("Sequence[tuple[MarketModel, AssetModel]]", result.all())
         return [_to_domain(m) for m, _ in rows]
+
+    async def get_result(self, market_id: int) -> MarketResult | None:
+        stmt = select(MarketResultModel).where(MarketResultModel.market_id == market_id)
+        row = await self._session.scalar(stmt)
+        if row is None:
+            return None
+        return MarketResult(
+            market_id=row.market_id,
+            open_price=row.open_price,
+            close_price=row.close_price,
+            result=row.result,
+            volume_usdc=row.volume_usdc,
+            price_source=row.price_source,
+            resolved_at=row.resolved_at,
+        )
+
+    async def save_result(self, result: MarketResult) -> None:
+        """Simpan market_results idempoten (market_id = PK): ON CONFLICT DO NOTHING."""
+        stmt = (
+            pg_insert(MarketResultModel)
+            .values(
+                market_id=result.market_id,
+                open_price=result.open_price,
+                close_price=result.close_price,
+                result=result.result,
+                volume_usdc=result.volume_usdc,
+                price_source=result.price_source,
+                resolved_at=result.resolved_at,
+            )
+            .on_conflict_do_nothing(index_elements=["market_id"])
+        )
+        await self._session.execute(stmt)
+
+    async def update_status(self, market_id: int, status: MarketStatus) -> None:
+        """Perbarui status market (validasi transisi dilakukan use case/domain)."""
+        stmt = update(MarketModel).where(MarketModel.id == market_id).values(status=status.name)
+        await self._session.execute(stmt)
+
+    async def has_result(self, market_id: int) -> bool:
+        stmt = select(exists().where(MarketResultModel.market_id == market_id))
+        return bool(await self._session.scalar(stmt))
+
+    async def list_pending_resolution(self, limit: int) -> Sequence[PendingMarket]:
+        """Market CLOSED yang belum punya market_results (urut end_at lama dulu)."""
+        stmt = (
+            select(MarketModel)
+            .where(
+                MarketModel.status == MarketStatus.CLOSED,
+                ~exists().where(MarketResultModel.market_id == MarketModel.id),
+            )
+            .order_by(MarketModel.end_at)
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        rows = result.scalars().all()
+        return [
+            PendingMarket(
+                market_id=row.id,
+                condition_id=row.condition_id,
+                slug=row.slug,
+                status=row.status,
+            )
+            for row in rows
+        ]
 
     async def _ensure_asset(self, symbol: str) -> int:
         """Buat asset bila belum ada (idempoten); kembalikan id-nya."""
