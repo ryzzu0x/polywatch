@@ -135,11 +135,20 @@ Error ditampilkan ke pengguna sebagai pesan singkat; detail (kode + trace id) ma
    jendela berjalan + 2 ke depan (closed=false) → upsert markets (live/upcoming)
    jendela 3 ke belakang (closed=true) → upsert markets (closed, untuk record_result)
    guard anti-stale: slug cocok pola updown DAN endDate ±6 jam → selain itu skipped_stale
-   list-endpoint hanya supplement, wajib lolos filter anti-stale yang sama
+   list-endpoint TIDAK dipakai jalur normal (T-028: supplement opt-in saja —
+   sumber kebenaran slug per jendela; log payload rusak DEBUG + rate-limit 60 dtk)
+
+[Scheduler tiap 30 dtk, sebelum record_result] sweep_market_status (T-028/ADR-015)
+   selaraskan status dengan jendela waktu (aturan domain status_at):
+   UPCOMING/LIVE dengan end_at < now → CLOSED (ditemukan record_result);
+   UPCOMING yang jendelanya berjalan → LIVE (discover penuh bisa >5 mnt)
+   batch + idempoten lewat list_stale_open → update_status per market
 
 [Task kontinyu, refresh token tiap 30 dtk] ingest_trades (T-026/ADR-013: loop kontinyu)
-   token market live = LiveTokenQuery (status LIVE; semantik watch default-enabled
-   ADR-012: watch_config hanya menyimpan override, tabel kosong = semua aktif)
+   token market aktif = LiveTokenQuery BERBASIS JENDELA WAKTU (T-028/ADR-015:
+   start_at - 5 dtk <= now < end_at, status ≠ RESOLVED — bukan status LIVE
+   yang bisa basi; semantik watch default-enabled ADR-012: watch_config
+   hanya menyimpan override, tabel kosong = semua aktif)
    → satu langganan WS CLOB market channel hidup seumur proses (reconnect saat
    server menutup koneksi close 1000 per akhir jendela 5m/15m, re-subscribe
    dengan token terbaru) → event `last_trade_price` (tx_hash) → fetch receipt

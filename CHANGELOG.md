@@ -5,6 +5,38 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Fixed — T-028 (market tidak mengalir: status beku + ingest market selesai + banjir log Gamma)
+- **Bug 1 (status market tidak pernah maju):** seluruh 38 market
+  berstatus LIVE sudah lewat `end_at` (`status='LIVE' and end_at >
+  now()` = 0 baris) dan 23 dari 55 UPCOMING juga sudah lewat —
+  `record_result` (hanya memproses CLOSED) tidak pernah menemukan
+  market untuk di-resolve. **Perbaikan (ADR-015):** use case baru
+  `SweepMarketStatus` — batch idempoten tiap siklus result yang
+  menyelaraskan status dengan jendela waktu memakai aturan domain
+  `status_at`: UPCOMING/LIVE dengan `end_at < now` → CLOSED, dan
+  UPCOMING yang jendelanya berjalan → LIVE (siklus discover penuh
+  bisa >5 menit; tanpa arah kedua market baru tak pernah LIVE).
+  Port baru `MarketRepository.list_stale_open` + DTO `StaleMarket`.
+- **Bug 2 (ingest subscribe market yang sudah selesai):**
+  `SqlAlchemyLiveTokenQuery` memilih token dari `status='LIVE'` yang
+  basi → WS tidak pernah mengirim trade (`trades` beku).
+  **Perbaikan (ADR-015):** query berbasis jendela waktu —
+  `start_at - 5 dtk <= now < end_at` dan status ≠ RESOLVED; market
+  LIVE basi tidak diambil, market aktif walau statusnya masih
+  UPCOMING tetap diambil (margin early-subscribe 5 dtk).
+- **Bug 3 (8.000 WARNING per siklus):** suplemen list-endpoint Gamma
+  mengembalikan market non-Up/Down (`wsl2-wol-nfo-...`) sampai offset
+  1900 → ~8.000 WARNING `market Gamma di-skip: payload rusak` per
+  siklus discover membanjiri journald. **Perbaikan:** suplemen
+  diputus dari jalur normal (`supplement_source` opt-in; container
+  tidak memasangnya — sumber kebenaran slug per jendela, ADR-010);
+  log `payload rusak` diturunkan ke DEBUG dengan rate-limit 60 dtk.
+- Bukti run nyata (satu instance, `timeout 420`, 15:24–15:31Z):
+  sweep `closed=7 started=7` + `closed=8 started=8`;
+  `mulai ingest ws tokens=26 markets=13`; `trades` 5.341 → 8.243
+  (+2.902); `market_results` 549 → 580 (+31); 0 WARNING payload
+  rusak. 376 → 393 test.
+
 ### Fixed — T-027 (alert palsu health monitor + instance ganda)
 - **Bug 1 (dua instance berjalan bersamaan):** dua HealthMonitor
   mengirim alert ganda ke owner dan polling Telegram saling mengganggu
