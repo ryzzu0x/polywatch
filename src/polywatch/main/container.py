@@ -6,19 +6,29 @@ tidak membuka koneksi), bot Telegram + dispatcher, dan background task
 ingest (T-014). Use case bot (`bot_status`, `manage_settings`,
 `list_results`) dirakit di sini — handler presentation hanya menerima
 objek use case.
+
+T-023: akses DB per-task. Session DB dikelola lewat
+`async_scoped_session(..., scopefunc=asyncio.current_task)`: setiap
+task asyncio (update Telegram, siklus scheduler, siklus ingest) mendapat
+session sendiri; session di-remove di akhir tiap update/siklus (middleware
+bot + `finally` tiap siklus) sehingga koneksi tidak bocor dan tidak ada
+satu `AsyncSession` yang dipakai bersama lintas task (penyebab
+`InvalidRequestError` konkuren pada /markets & /status).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
+    async_scoped_session,
     async_sessionmaker,
     create_async_engine,
 )
@@ -74,6 +84,7 @@ class Container:
     clock: Clock
     _engine: AsyncEngine | None = field(default=None, repr=False)
     _session_factory: async_sessionmaker[AsyncSession] | None = field(default=None, repr=False)
+    _scoped: async_scoped_session[AsyncSession] | None = field(default=None, repr=False)
     _bot: object | None = field(default=None, repr=False)
     _dispatcher: object | None = field(default=None, repr=False)
     bot_status: BotStatus | None = field(default=None, repr=False)
@@ -89,12 +100,77 @@ class Container:
     recompute_cycle: Any | None = field(default=None, repr=False)
     health_monitor: Any | None = field(default=None, repr=False)
 
+    # ------------------------------------------------------------------ DB session
+
+    @property
+    def engine(self) -> AsyncEngine:
+        """Engine DB, dibuat saat pertama kali dipakai."""
+        if self._engine is None:
+            self._engine = create_engine(self.settings)
+        return self._engine
+
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        if self._session_factory is None:
+            self._session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
+        return self._session_factory
+
+    @property
+    def scoped_session(self) -> async_scoped_session[AsyncSession]:
+        """Session per-task asyncio (T-023).
+
+        Task yang berbeda (update Telegram, siklus scheduler, siklus ingest)
+        mendapat session berbeda; task yang sama mendapat session yang sama
+        sehingga satu update tetap satu unit-of-work. Pemanggil wajib
+        me-remove session-nya di akhir via `release_session()`.
+        """
+        if self._scoped is None:
+            self._scoped = async_scoped_session(
+                self.session_factory, scopefunc=asyncio.current_task
+            )
+        return self._scoped
+
+    async def release_session(self) -> None:
+        """Commit unit-of-work task ini lalu remove session-nya (T-023).
+
+        Dipanggil di `finally` middleware bot (tiap update) dan di akhir
+        tiap siklus scheduler/ingest. Commit menyimpan tulisan handler
+        (unit-of-work per update); `remove()` menutup session dan
+        mengembalikan koneksi ke pool — aman walau task tidak pernah
+        memakai session (commit pada session tanpa transaksi adalah no-op).
+        """
+        if self._scoped is None:
+            return
+        session = self._scoped()
+        try:
+            if session.in_transaction():
+                await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception("commit session update gagal", extra={"event": "session_commit_error"})
+        finally:
+            await self._scoped.remove()
+
+    async def _session_commit(self) -> None:
+        """Commit unit-of-work task ini + log bila checkout/commit gagal."""
+        session = self.scoped_session
+        try:
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception("commit session gagal", extra={"event": "session_commit_error"})
+            raise
+
+    # ------------------------------------------------------------------ scheduler
+
     def setup_scheduler(self) -> None:
         """Rakit use case siklus penuh untuk scheduler (T-018 wiring).
 
         DiscoverMarkets (Gamma), RecordResult (Gamma + harga), dan
         RecomputeScores dipasang di sini; runner menjalankan loop periodiknya.
         Hook on_saved ingest (alert) tetap dipasang lewat `setup_ingest`.
+        T-023: tiap siklus memakai session per-task dan me-remove-nya di
+        `finally` — dua loop scheduler tidak berbagi session.
         """
         from polywatch.application.use_cases.discover_markets import DiscoverMarkets
         from polywatch.application.use_cases.recompute_scores import RecomputeScores
@@ -117,47 +193,44 @@ class Container:
         gamma = GammaMarketSource(base_url=self.settings.polymarket_gamma_url)
 
         async def run_discover() -> Any:
-            session = self.session_factory()
             try:
                 discover = DiscoverMarkets(
                     source=gamma,
-                    repository=SqlAlchemyMarketRepository(session),
+                    repository=SqlAlchemyMarketRepository(self.scoped_session()),
                     clock=self.clock,
                 )
                 summary = await discover.execute()
-                await session.commit()
+                await self._session_commit()
                 return summary
             finally:
-                await session.close()
+                await self.release_session()
 
         async def run_record_result() -> Any:
-            session = self.session_factory()
             try:
                 record = RecordResult(
                     source=gamma,
-                    repository=SqlAlchemyMarketRepository(session),
+                    repository=SqlAlchemyMarketRepository(self.scoped_session()),
                     primary_price=PolymarketPriceSource(),
                     fallback_price=BinancePriceSource(),
                     clock=self.clock,
                 )
                 summaries = await record.execute()
-                await session.commit()
+                await self._session_commit()
                 return summaries
             finally:
-                await session.close()
+                await self.release_session()
 
         async def run_recompute(market_id: int) -> Any:
-            session = self.session_factory()
             try:
                 recompute = RecomputeScores(
-                    trades=SqlAlchemyTradeRepository(session),
-                    wallet_stats=SqlAlchemyWalletStatsRepository(session),
+                    trades=SqlAlchemyTradeRepository(self.scoped_session()),
+                    wallet_stats=SqlAlchemyWalletStatsRepository(self.scoped_session()),
                 )
                 summary = await recompute.execute(market_id)
-                await session.commit()
+                await self._session_commit()
                 return summary
             finally:
-                await session.close()
+                await self.release_session()
 
         self.discover_cycle = run_discover
         self.record_result_cycle = run_record_result
@@ -167,12 +240,17 @@ class Container:
             extra={"event": "container_scheduler_setup", "version": __version__},
         )
 
+    # ------------------------------------------------------------------ health
+
     def setup_health(self) -> None:
         """Rakit HealthMonitor (T-019): bacaan aktivitas + notifier owner.
 
         State kesehatan in-memory (ADR-008) — tidak ada tabel baru. Notifikasi
         keluar tetap lewat port `Notifier` (TelegramNotifier), bukan aiogram
         langsung dari use case.
+
+        T-023: repository aktivitas dibuat per-cek (session per-task) —
+        tidak ada session bersama dengan handler bot.
         """
         from polywatch.application.use_cases.health_monitor import HealthMonitor
         from polywatch.infrastructure.db.repositories.trade_repository import (
@@ -180,13 +258,25 @@ class Container:
         )
         from polywatch.infrastructure.telegram_notifier import TelegramNotifier
 
-        activity = SqlAlchemyTradeRepository(self.session_factory())
+        def activity_repo() -> Any:
+            return SqlAlchemyTradeRepository(self.scoped_session())
+
+        class _ScopedActivity:
+            """Adapter kecil: tiap cek ambil session per-task lalu remove."""
+
+            async def last_trade_at_live(inner_self) -> Any:
+                try:
+                    repo = activity_repo()
+                    return await repo.last_trade_at_live()
+                finally:
+                    await self.release_session()
+
         notifier = TelegramNotifier(
             bot_token=self.settings.bot_token.get_secret_value(),
             owner_chat_id=self.settings.owner_chat_id,
         )
         self.health_monitor = HealthMonitor(
-            activity=activity,
+            activity=_ScopedActivity(),
             notifier=notifier,
             clock=self.clock,
             stale_ingest_s=self.settings.stale_ingest_s,
@@ -203,18 +293,7 @@ class Container:
     def build(cls, settings: Settings) -> Container:
         return cls(settings=settings, clock=SystemClock())
 
-    @property
-    def engine(self) -> AsyncEngine:
-        """Engine DB, dibuat saat pertama kali dipakai."""
-        if self._engine is None:
-            self._engine = create_engine(self.settings)
-        return self._engine
-
-    @property
-    def session_factory(self) -> async_sessionmaker[AsyncSession]:
-        if self._session_factory is None:
-            self._session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
-        return self._session_factory
+    # ------------------------------------------------------------------ repos
 
     def repositories(
         self,
@@ -224,9 +303,11 @@ class Container:
         UserRepositoryPort,
         WatchConfigRepositoryPort,
     ]:
-        """Rakit repository untuk satu session DB (import terlambat: hindari
-        ketergantungan main→infrastructure pada level modul... tetap legal
-        karena main adalah composition root)."""
+        """Rakit repository untuk session task saat ini (T-023: scoped).
+
+        Import terlambat: hindari ketergantungan main→infrastructure pada
+        level modul... tetap legal karena main adalah composition root.
+        """
         from polywatch.infrastructure.db.repositories.market_repository import (
             SqlAlchemyMarketRepository,
         )
@@ -240,7 +321,7 @@ class Container:
             SqlAlchemyWatchConfigRepository,
         )
 
-        session = self.session_factory()
+        session = self.scoped_session()
         return (
             SqlAlchemyMarketRepository(session),
             SqlAlchemyTradeRepository(session),
@@ -249,39 +330,97 @@ class Container:
         )
 
     def _wallet_stats_repo(self) -> WalletStatsRepositoryPort:
-        """Repository wallet_stats pada session sendiri."""
+        """Repository wallet_stats pada session task saat ini."""
         from polywatch.infrastructure.db.repositories.wallet_stats_repository import (
             SqlAlchemyWalletStatsRepository,
         )
 
-        return SqlAlchemyWalletStatsRepository(self.session_factory())
+        return SqlAlchemyWalletStatsRepository(self.scoped_session())
 
     def _watchlist_repo(self) -> WatchlistRepositoryPort:
-        """Repository watchlist pada session sendiri."""
+        """Repository watchlist pada session task saat ini."""
         from polywatch.infrastructure.db.repositories.watchlist_repository import (
             SqlAlchemyWatchlistRepository,
         )
 
-        return SqlAlchemyWatchlistRepository(self.session_factory())
+        return SqlAlchemyWatchlistRepository(self.scoped_session())
 
     def _alert_settings_repo(self) -> AlertSettingsRepositoryPort:
-        """Repository alert_settings pada session sendiri."""
+        """Repository alert_settings pada session task saat ini."""
         from polywatch.infrastructure.db.repositories.alert_repository import (
             SqlAlchemyAlertSettingsRepository,
         )
 
-        return SqlAlchemyAlertSettingsRepository(self.session_factory())
+        return SqlAlchemyAlertSettingsRepository(self.scoped_session())
 
     def _alerts_sent_repo(self) -> AlertsSentRepositoryPort:
-        """Repository alerts_sent pada session sendiri."""
+        """Repository alerts_sent pada session task saat ini."""
         from polywatch.infrastructure.db.repositories.alert_repository import (
             SqlAlchemyAlertsSentRepository,
         )
 
-        return SqlAlchemyAlertsSentRepository(self.session_factory())
+        return SqlAlchemyAlertsSentRepository(self.scoped_session())
+
+    # ------------------------------------------------------------------ bot
+
+    def _bot_providers(self) -> dict[str, Callable[[], Any]]:
+        """Provider use case bot per-update (T-023).
+
+        Setiap provider merakit use case dengan repository pada session task
+        yang memanggil (update Telegram berjalan sebagai task asyncio
+        terpisah). Ini yang dipakai `build_dispatcher`; container tetap
+        composition root dan use case tetap tidak tahu SQLAlchemy.
+        """
+
+        def status() -> BotStatus:
+            markets, trades, _users, _watch = self.repositories()
+            return BotStatus(
+                cast(MarketStatsRepositoryPort, markets),
+                cast(TradeStatsRepositoryPort, trades),
+                self.clock,
+            )
+
+        def settings() -> ManageSettings:
+            _markets, _trades, users, watch = self.repositories()
+            return ManageSettings(users, watch)
+
+        def results() -> ListResults:
+            markets, _trades, _users, _watch = self.repositories()
+            return ListResults(cast(MarketStatsRepositoryPort, markets))
+
+        def top() -> TopWallets:
+            return TopWallets(self._wallet_stats_repo())
+
+        def wallet() -> WalletDetail:
+            _markets, _trades, users, _watch = self.repositories()
+            return WalletDetail(self._wallet_stats_repo(), users, self._watchlist_repo())
+
+        def watchlist() -> ManageWatchlist:
+            _markets, _trades, users, _watch = self.repositories()
+            return ManageWatchlist(users, self._watchlist_repo())
+
+        def alerts() -> ManageAlerts:
+            _markets, _trades, users, _watch = self.repositories()
+            return ManageAlerts(users, self._alert_settings_repo())
+
+        return {
+            "status": status,
+            "settings": settings,
+            "results": results,
+            "top": top,
+            "wallet": wallet,
+            "watchlist": watchlist,
+            "alerts": alerts,
+        }
 
     async def setup_bot(self) -> None:
-        """Rakit use case bot + dispatcher (dipanggil runner, bukan --check)."""
+        """Rakit use case bot + dispatcher (dipanggil runner, bukan --check).
+
+        T-023: use case BOT dirakit ulang per update lewat provider
+        (`_bot_providers`) — setiap update Telegram mendapat use case dengan
+        session DB sendiri. Session task rakitan ini di-remove setelah
+        dispatcher selesai dibuat.
+        """
         from aiogram import Bot
 
         from polywatch.presentation.bot.handlers import build_dispatcher
@@ -302,27 +441,36 @@ class Container:
         self.manage_alerts = ManageAlerts(users, alert_settings)
         bot = Bot(token=self.settings.bot_token.get_secret_value())
         self._bot = bot
+        providers = self._bot_providers()
         self._dispatcher = build_dispatcher(
             bot,
             owner_chat_id=owner,
-            status_use_case=self.bot_status,
-            settings_use_case=self.manage_settings,
-            results_use_case=self.list_results,
-            top_use_case=self.top_wallets,
-            wallet_use_case=self.wallet_detail,
-            watchlist_use_case=self.manage_watchlist,
-            alerts_use_case=self.manage_alerts,
+            status_use_case=providers["status"],
+            settings_use_case=providers["settings"],
+            results_use_case=providers["results"],
+            top_use_case=providers["top"],
+            wallet_use_case=providers["wallet"],
+            watchlist_use_case=providers["watchlist"],
+            alerts_use_case=providers["alerts"],
+            release_session=self.release_session,
         )
+        await self.release_session()
         logger.info(
             "use case bot dirakit",
             extra={"event": "container_bot_setup", "version": __version__},
         )
+
+    # ------------------------------------------------------------------ ingest
 
     def setup_ingest(self) -> None:
         """Rakit IngestTrades dengan hook on_saved → evaluate_alert (T-017).
 
         Hook hanya dipasang bila method ini dipanggil; perilaku runner tanpa
         hook tidak berubah. Trade yang tersimpan langsung dievaluasi alert.
+
+        T-023: evaluator alert dibuat per-panggilan `on_saved` dengan session
+        task saat ini (ingest dan evaluasi boleh berbagi unit-of-work satu
+        siklus, tapi tidak berbagi session dengan task lain).
         """
         from polywatch.application.use_cases.evaluate_alert import EvaluateAlert
         from polywatch.application.use_cases.ingest_trades import IngestTrades
@@ -355,30 +503,26 @@ class Container:
         )
         from polywatch.infrastructure.telegram_notifier import TelegramNotifier
 
-        alert_session = self.session_factory()
-        markets = SqlAlchemyMarketRepository(alert_session)
-        users = SqlAlchemyUserRepository(alert_session)
-        wallet_stats = SqlAlchemyWalletStatsRepository(alert_session)
-        watchlist = SqlAlchemyWatchlistRepository(alert_session)
-        alert_settings = SqlAlchemyAlertSettingsRepository(alert_session)
-        alerts_sent = SqlAlchemyAlertsSentRepository(alert_session)
-        notifier = TelegramNotifier(
-            bot_token=self.settings.bot_token.get_secret_value(),
-            owner_chat_id=self.settings.owner_chat_id,
-        )
-        evaluator = EvaluateAlert(
-            wallet_stats=wallet_stats,
-            markets=markets,
-            users=users,
-            watchlist=watchlist,
-            settings_repo=alert_settings,
-            alerts_sent=alerts_sent,
-            notifier=notifier,
-            clock=self.clock,
-            telegram_id=self.settings.owner_chat_id,
-        )
+        def build_evaluator() -> EvaluateAlert:
+            """Evaluator alert dengan session task saat ini (per-call)."""
+            session = self.scoped_session()
+            return EvaluateAlert(
+                wallet_stats=SqlAlchemyWalletStatsRepository(session),
+                markets=SqlAlchemyMarketRepository(session),
+                users=SqlAlchemyUserRepository(session),
+                watchlist=SqlAlchemyWatchlistRepository(session),
+                settings_repo=SqlAlchemyAlertSettingsRepository(session),
+                alerts_sent=SqlAlchemyAlertsSentRepository(session),
+                notifier=TelegramNotifier(
+                    bot_token=self.settings.bot_token.get_secret_value(),
+                    owner_chat_id=self.settings.owner_chat_id,
+                ),
+                clock=self.clock,
+                telegram_id=self.settings.owner_chat_id,
+            )
 
         async def on_saved(new_trades: Sequence[Trade]) -> None:
+            evaluator = build_evaluator()
             for trade in new_trades:
                 try:
                     decision = await evaluator.evaluate(trade)
@@ -398,16 +542,15 @@ class Container:
                         extra={"event": "alert_eval_error", "wallet": trade.wallet},
                     )
             try:
-                await alert_session.commit()
+                await self._session_commit()
             except Exception:
-                await alert_session.rollback()
                 logger.exception("commit alert gagal", extra={"event": "alert_commit_error"})
 
         async def run_ingest_once() -> None:
-            session = self.session_factory()
             try:
                 from polywatch.domain.market import Timeframe
 
+                session = self.scoped_session()
                 live = SqlAlchemyLiveTokenQuery(session)
                 tokens = await live.live_tokens(list(Timeframe))
                 stream = OrderbookWsAdapter()
@@ -428,15 +571,17 @@ class Container:
                     "hook ingest siklus selesai",
                     extra={"event": "ingest_cycle_done", "trades_saved": stats.trades_saved},
                 )
-                await session.commit()
+                await self._session_commit()
             finally:
-                await session.close()
+                await self.release_session()
 
         self.ingest_hooks.append(run_ingest_once)
         logger.info(
             "ingest + alert hook dirakit",
             extra={"event": "container_ingest_setup", "version": __version__},
         )
+
+    # ------------------------------------------------------------------ shutdown
 
     async def aclose(self) -> None:
         """Tutup engine dan session bot bila terbuka (shutdown rapi)."""
@@ -448,6 +593,9 @@ class Container:
             self._bot = None
             self._dispatcher = None
         if self._engine is not None:
+            if self._scoped is not None:
+                await self._scoped.close()
+                self._scoped = None
             await self._engine.dispose()
             self._engine = None
             self._session_factory = None

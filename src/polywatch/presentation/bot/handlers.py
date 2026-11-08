@@ -109,6 +109,39 @@ def _chat_id(event: TelegramObject) -> int | None:
     return None
 
 
+class SessionReleaseMiddleware(BaseMiddleware):
+    """Commit + remove session DB task ini setelah update selesai (T-023).
+
+    aiogram memproses update sebagai task asyncio terpisah; use case bot
+    dibuat per-update dengan session DB sendiri (provider di container).
+    Middleware ini menjalankan unit-of-work per update: commit bila handler
+    sukses (rollback otomatis bila exception — `remove()` menutup session
+    tanpa commit), lalu mengembalikan koneksi ke pool. Jalur error pun tetap
+    melepas session sehingga koneksi tidak bocor.
+    """
+
+    def __init__(self, release: Callable[[], Awaitable[None]]) -> None:
+        self._release = release
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        try:
+            result = await handler(event, data)
+        finally:
+            try:
+                await self._release()
+            except Exception:
+                logger.exception(
+                    "gagal melepas session DB update",
+                    extra={"event": "session_release_error"},
+                )
+        return result
+
+
 def format_markets(entries: Sequence[WatchEntry]) -> str:
     """Formatter murni untuk /markets (dites unit tanpa Telegram)."""
     if not entries:
@@ -188,15 +221,25 @@ def alerts_keyboard(values: dict[str, object]) -> InlineKeyboardMarkup:
 
 def build_router(
     owner_chat_id: int,
-    status_use_case: BotStatus,
-    settings_use_case: ManageSettings,
-    results_use_case: ListResults,
-    top_use_case: TopWallets | None = None,
-    wallet_use_case: WalletDetail | None = None,
-    watchlist_use_case: ManageWatchlist | None = None,
-    alerts_use_case: ManageAlerts | None = None,
+    status_use_case: BotStatus | Callable[[], BotStatus],
+    settings_use_case: ManageSettings | Callable[[], ManageSettings],
+    results_use_case: ListResults | Callable[[], ListResults],
+    top_use_case: TopWallets | Callable[[], TopWallets | None] | None = None,
+    wallet_use_case: WalletDetail | Callable[[], WalletDetail | None] | None = None,
+    watchlist_use_case: ManageWatchlist | Callable[[], ManageWatchlist | None] | None = None,
+    alerts_use_case: ManageAlerts | Callable[[], ManageAlerts | None] | None = None,
 ) -> Router:
-    """Router berisi seluruh handler perintah (tanpa middleware)."""
+    """Router berisi seluruh handler perintah (tanpa middleware).
+
+    Use case boleh berupa instance atau provider (`Callable[[], UseCase]`,
+    T-023): provider dipanggil di awal tiap update sehingga use case (dan
+    session DB-nya) dibuat per-update, tidak dipakai bersama lintas update.
+    """
+
+    def _resolve(provider_or_use_case: Any) -> Any:
+        """Ambil instance use case: panggil provider bila berupa callable."""
+        return provider_or_use_case() if callable(provider_or_use_case) else provider_or_use_case
+
     router = Router(name="commands")
 
     @router.message(CommandStart())
@@ -205,11 +248,13 @@ def build_router(
 
     @router.message(Command("status"))
     async def _status(message: Message) -> None:
-        await message.answer(_truncate(await status_use_case.execute()))
+        status = _resolve(status_use_case)
+        await message.answer(_truncate(await status.execute()))
 
     @router.message(Command("markets"))
     async def _markets(message: Message) -> None:
-        entries = await settings_use_case.list_watch(owner_chat_id)
+        settings = _resolve(settings_use_case)
+        entries = await settings.list_watch(owner_chat_id)
         await message.answer(
             _truncate(format_markets(entries)),
             reply_markup=markets_keyboard(entries),
@@ -217,6 +262,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith("toggle:"))
     async def _toggle(callback: CallbackQuery) -> None:
+        settings = _resolve(settings_use_case)
         parts = (callback.data or "").split(":")
         if len(parts) != 3:
             await callback.answer("Permintaan tidak dikenal.", show_alert=False)
@@ -227,7 +273,7 @@ def build_router(
         except ValueError:
             await callback.answer("Timeframe tidak valid.", show_alert=False)
             return
-        entries = await settings_use_case.list_watch(owner_chat_id)
+        entries = await settings.list_watch(owner_chat_id)
         current = next(
             (e.enabled for e in entries if e.asset == asset and e.timeframe == timeframe),
             None,
@@ -236,11 +282,11 @@ def build_router(
             await callback.answer("Aset tidak ditemukan.", show_alert=False)
             return
         try:
-            await settings_use_case.set_watch_enabled(owner_chat_id, asset, timeframe, not current)
+            await settings.set_watch_enabled(owner_chat_id, asset, timeframe, not current)
         except (InvalidAssetError, SettingsInvalidAssetError, UnknownAssetError, ValueError):
             await callback.answer("Gagal memperbarui konfigurasi.", show_alert=False)
             return
-        new_entries = await settings_use_case.list_watch(owner_chat_id)
+        new_entries = await settings.list_watch(owner_chat_id)
         if isinstance(callback.message, Message):
             await callback.message.edit_text(
                 _truncate(format_markets(new_entries)),
@@ -269,8 +315,9 @@ def build_router(
         if limit is not None and not 1 <= limit <= 20:
             await message.answer("Jumlah baris harus 1-20.")
             return
+        results = _resolve(results_use_case)
         try:
-            text = await results_use_case.execute(asset_arg, timeframe_arg, limit)
+            text = await results.execute(asset_arg, timeframe_arg, limit)
         except InvalidAssetError:
             await message.answer("Aset tidak valid. Contoh: btc, eth")
             return
@@ -291,7 +338,9 @@ def build_router(
                 except ValueError:
                     await message.answer("Jumlah baris harus angka. Contoh: /top 15")
                     return
-            await message.answer(_truncate(await top_use_case.execute(limit)))
+            top = _resolve(top_use_case)
+            assert top is not None
+            await message.answer(_truncate(await top.execute(limit)))
 
     if wallet_use_case is not None:
 
@@ -301,8 +350,10 @@ def build_router(
             if not args:
                 await message.answer("Pemakaian: /wallet <alamat>")
                 return
+            wallet = _resolve(wallet_use_case)
+            assert wallet is not None
             try:
-                text = await wallet_use_case.execute(message.chat.id, args[0])
+                text = await wallet.execute(message.chat.id, args[0])
             except InvalidWalletError:
                 await message.answer(
                     "Alamat wallet tidak valid. Contoh: 0x diikuti 40 karakter heksadesimal."
@@ -318,8 +369,10 @@ def build_router(
             if not args:
                 await message.answer("Pemakaian: /watch <alamat>")
                 return
+            watchlist = _resolve(watchlist_use_case)
+            assert watchlist is not None
             try:
-                text = await watchlist_use_case.watch(message.chat.id, args[0])
+                text = await watchlist.watch(message.chat.id, args[0])
             except InvalidWalletError:
                 await message.answer(
                     "Alamat wallet tidak valid. Contoh: 0x diikuti 40 karakter heksadesimal."
@@ -333,8 +386,10 @@ def build_router(
             if not args:
                 await message.answer("Pemakaian: /unwatch <alamat>")
                 return
+            watchlist = _resolve(watchlist_use_case)
+            assert watchlist is not None
             try:
-                text = await watchlist_use_case.unwatch(message.chat.id, args[0])
+                text = await watchlist.unwatch(message.chat.id, args[0])
             except InvalidWalletError:
                 await message.answer(
                     "Alamat wallet tidak valid. Contoh: 0x diikuti 40 karakter heksadesimal."
@@ -346,7 +401,9 @@ def build_router(
 
         @router.message(Command("alerts"))
         async def _alerts(message: Message) -> None:
-            values = await alerts_use_case.get(message.chat.id)
+            alerts = _resolve(alerts_use_case)
+            assert alerts is not None
+            values = await alerts.get(message.chat.id)
             await message.answer(
                 _truncate(ManageAlerts.format(values)),
                 reply_markup=alerts_keyboard(values),
@@ -354,6 +411,8 @@ def build_router(
 
         @router.callback_query(F.data.startswith("alert:"))
         async def _alert_setting(callback: CallbackQuery) -> None:
+            alerts = _resolve(alerts_use_case)
+            assert alerts is not None
             parts = (callback.data or "").split(":")
             if len(parts) != 3:
                 await callback.answer("Permintaan tidak dikenal.", show_alert=False)
@@ -361,22 +420,22 @@ def build_router(
             _, field, raw = parts
             try:
                 if field == "score":
-                    values = await alerts_use_case.set_min_score(
+                    values = await alerts.set_min_score(
                         callback.message.chat.id if callback.message else owner_chat_id,
                         Decimal(raw),
                     )
                 elif field == "usdc":
-                    values = await alerts_use_case.set_min_usdc(
+                    values = await alerts.set_min_usdc(
                         callback.message.chat.id if callback.message else owner_chat_id,
                         Decimal(raw),
                     )
                 elif field == "cooldown":
-                    values = await alerts_use_case.set_cooldown_sec(
+                    values = await alerts.set_cooldown_sec(
                         callback.message.chat.id if callback.message else owner_chat_id,
                         int(raw),
                     )
                 elif field == "enabled":
-                    values = await alerts_use_case.set_enabled(
+                    values = await alerts.set_enabled(
                         callback.message.chat.id if callback.message else owner_chat_id,
                         raw == "on",
                     )
@@ -399,18 +458,28 @@ def build_router(
 def build_dispatcher(
     bot: Bot,
     owner_chat_id: int,
-    status_use_case: BotStatus,
-    settings_use_case: ManageSettings,
-    results_use_case: ListResults,
-    top_use_case: TopWallets | None = None,
-    wallet_use_case: WalletDetail | None = None,
-    watchlist_use_case: ManageWatchlist | None = None,
-    alerts_use_case: ManageAlerts | None = None,
+    status_use_case: BotStatus | Callable[[], BotStatus],
+    settings_use_case: ManageSettings | Callable[[], ManageSettings],
+    results_use_case: ListResults | Callable[[], ListResults],
+    top_use_case: TopWallets | Callable[[], TopWallets | None] | None = None,
+    wallet_use_case: WalletDetail | Callable[[], WalletDetail | None] | None = None,
+    watchlist_use_case: ManageWatchlist | Callable[[], ManageWatchlist | None] | None = None,
+    alerts_use_case: ManageAlerts | Callable[[], ManageAlerts | None] | None = None,
+    release_session: Callable[[], Awaitable[None]] | None = None,
 ) -> Dispatcher:
-    """Rakit Dispatcher: guard owner + router perintah (composition root)."""
+    """Rakit Dispatcher: guard owner + router perintah (composition root).
+
+    `release_session` (opsional, T-023): callback yang me-remove session DB
+    per-task setelah tiap update selesai — dipasang sebagai middleware
+    terakhir sehingga selalu berjalan (termasuk jalur error handler).
+    """
     dp = Dispatcher()
     dp.message.middleware(OwnerOnlyMiddleware(owner_chat_id))
     dp.callback_query.middleware(OwnerOnlyMiddleware(owner_chat_id))
+    if release_session is not None:
+        release_mw = SessionReleaseMiddleware(release_session)
+        dp.message.middleware(release_mw)
+        dp.callback_query.middleware(release_mw)
     dp.include_router(
         build_router(
             owner_chat_id,
@@ -431,6 +500,7 @@ __all__ = [
     "HELP_TEXT",
     "MAX_MESSAGE_LEN",
     "OwnerOnlyMiddleware",
+    "SessionReleaseMiddleware",
     "build_dispatcher",
     "build_router",
     "format_markets",

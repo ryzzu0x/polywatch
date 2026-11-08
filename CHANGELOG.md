@@ -5,6 +5,33 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Fixed — T-023 (konkurensi session DB)
+- **Bug:** `/markets` dan `/status` gagal saat update Telegram diproses
+  bersamaan — `InvalidRequestError: This session is provisioning a new
+  connection; concurrent operations are not permitted`. Penyebab:
+  `main/container.py` merakit setiap use case dengan satu `AsyncSession`
+  yang sama, lalu use case itu dipakai bersama oleh semua update
+  konkuren (aiogram), scheduler, dan ingest; satu `AsyncSession` tidak
+  boleh dipakai lintas task.
+- **Perbaikan (ADR-009, akses DB per-task/per-update):** container kini
+  memegang `async_scoped_session(async_sessionmaker,
+  scopefunc=asyncio.current_task)`; siklus scheduler/ingest/health ambil
+  session scoped lalu `commit` + `remove()` di `finally` tiap siklus.
+  Handler bot memakai provider use case per-update
+  (`Container._bot_providers` → `build_router` menerima instance atau
+  provider): setiap update Telegram merakit use case dengan session DB
+  sendiri; `SessionReleaseMiddleware` commit unit-of-work lalu remove
+  session di `finally` — jalur error pun melepas session (tidak ada
+  kebocoran koneksi; kegagalan commit/release di-log terstruktur
+  `session_commit_error`/`session_release_error`).
+- Use case tetap tidak tahu SQLAlchemy; container tetap composition root
+  (tidak ada perubahan layer).
+- Test regresi `tests/e2e/test_concurrent_updates.py`: 6 update konkuren
+  (2× `/markets`, `/status`, `/top`, `/alerts`, callback toggle) via
+  `asyncio.gather` atas `Dispatcher.feed_update` dengan DB nyata
+  `polywatch_test` — sebelumnya mereproduksi error yang sama, kini semua
+  sukses dan tulisan toggle ter-commit. 316 → 317 test.
+
 ### Added — T-019 (health monitor)
 - `application/use_cases/health_monitor.py`: deteksi komponen basi — trade
   terakhir market LIVE (port baru `HealthActivityRepository`,
