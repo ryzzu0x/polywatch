@@ -28,6 +28,7 @@
 | ADR-005 | Sumber open/close price: Polymarket crypto-price (Chainlink), cadangan Binance | Diterima (spike T-005, 2026-11-08) |
 | ADR-006 | MVP alert saja; wallet & eksekusi di v2 dengan gate paper trading | Diterima |
 | ADR-007 | v2: wallet EVM per pengguna, kunci dienkripsi di server (kustodian) + ekspor oleh pengguna | Diterima |
+| ADR-008 | State health monitor in-memory (bukan tabel baru), notifikasi operasional via port Notifier | Diterima (T-019, 2026-11-08) |
 
 ---
 
@@ -116,3 +117,11 @@
 - **Keputusan:** Saat `/start` (v2), bot membuat keypair dengan `eth-account`, menyimpan private key terenkripsi AES-GCM (master key dari env `WALLET_MASTER_KEY`, tidak pernah di DB/log). Pengguna dapat mengekspor private key miliknya kapan pun (`/export_key`: konfirmasi eksplisit, pesan berisi kunci dihapus otomatis) sehingga dana tidak terkunci di server. Kredensial CLOB diturunkan dari wallet tersebut. Eksekusi mengikuti `copy_rules` + batas risiko pengguna; setiap order dan hasilnya dikirim sebagai alert.
 - **Alternatif:** Pengguna menghubungkan wallet sendiri (non-kustodian, lebih aman tetapi UX berat untuk Telegram); satu wallet bersama (tidak bisa memisahkan dana pengguna).
 - **Konsekuensi:** (+) UX paling mudah: `/start` → deposit → copy. (−) Server menjadi kustodian dana pengguna: risiko keamanan tinggi, perlu backup master key, dan aspek hukum/geoblock Polymarket harus diputuskan owner sebelum rilis publik.
+
+### ADR-008 — State health monitor in-memory, notifikasi operasional lewat port Notifier
+- **Tanggal:** 2026-11-08
+- **Status:** Diterima (T-019)
+- **Konteks:** Owner butuh tahu saat ingest dimatikan/mati > 2 menit atau siklus scheduler berhenti berhasil, tanpa spam notifikasi saat gangguan berjam-jam. Perlu juga notifikasi pemulihan. State kesehatan (aktivitas terakhir, status notifikasi, waktu kirim terakhir) harus disimpan di suatu tempat.
+- **Keputusan:** Seluruh state kesehatan disimpan in-memory di objek `HealthMonitor` (use case) — tidak ada tabel/migrasi baru. Notifikasi keluar tetap lewat port `Notifier` (TelegramNotifier) supaya Clean Architecture terjaga. Rate limit 1 notifikasi per jenis per 10 menit (`HEALTH_RATE_LIMIT_S`), grace period 5 menit saat start tanpa data.
+- **Alternatif:** Tabel `health_events` di DB (awet melewati restart, tetapi menambah migrasi + tulisan DB untuk data yang tidak dibutuhkan lintas restart di MVP); notifikasi langsung via aiogram dari use case (melanggar boundary).
+- **Konsekuensi:** (+) Sederhana, nol biaya DB, mudah dites. (−) Restart proses mereset grace period dan status notifikasi: bila gangguan masih berlangsung, owner mungkin menerima notifikasi basi sekali lagi setelah restart — dapat diterima untuk MVP; kalau mengganggu, naikkan ke persistensi di v1.

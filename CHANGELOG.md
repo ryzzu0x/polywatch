@@ -5,6 +5,39 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Added — T-019 (health monitor)
+- `application/use_cases/health_monitor.py`: deteksi komponen basi — trade
+  terakhir market LIVE (port baru `HealthActivityRepository`,
+  `SqlAlchemyTradeRepository.last_trade_at_live`), siklus discover/result
+  scheduler terakhir (dilaporkan via `record_cycle` dari loop; hanya siklus
+  sukses dihitung aktivitas). Ambang `STALE_INGEST_S` (120) /
+  `STALE_DISCOVER_S` (180); rate limit 1 notifikasi per jenis per
+  `HEALTH_RATE_LIMIT_S` (600 dtk) supaya tidak spam saat gangguan
+  berjam-jam; notifikasi pemulihan saat aktif kembali; grace period
+  `HEALTH_GRACE_S` (300) saat start tanpa data — tidak langsung alarm.
+  Semua state in-memory (ADR-008), notifikasi keluar lewat port `Notifier`.
+- Scheduler melaporkan tiap siklus (ok/gagal) ke monitor; laporan gagal
+  tidak mengganggu loop. Runner menjalankan `_health_loop` tiap
+  `HEALTH_CHECK_INTERVAL_S` (30) — no-op bila monitor tidak terpasang.
+  `Container.setup_health` merakit monitor dengan TelegramNotifier owner.
+  Notifikasi gagal kirim / check gagal hanya di-log. 297 → 316 test.
+
+### Added — T-020 (backup/restore)
+- `scripts/backup.sh`: `pg_dump` format custom (`-Fc`) ke
+  `${BACKUP_DIR}/<slug>-YYYYmmdd-HHMMSS.dump`, koneksi dari `APP_DB_URL`
+  atau `PG*` (tanpa nilai hardcoded), rotasi 14 hari
+  (`RETENTION_DAYS`, `find -mtime +14 -delete`), dump gagal di tengah →
+  file `.partial` dihapus + exit non-zero, `set -euo pipefail`.
+- `scripts/restore.sh`: `pg_restore` ke database target eksplisit
+  (default DB uji via `APP_DB_URL`/`PGDATABASE`/argumen), konfirmasi
+  interaktif wajib (ketik `RESTORE`) atau `--yes`, menolak restore ke
+  database produksi (`PROD_DATABASE`, default `polywatch_db`) tanpa
+  `--force-prod`.
+- `README.md`: bagian cara pakai backup/restore + jadwal cron contoh
+  tanpa path server nyata. Diverifikasi nyata: backup `polywatch_db` →
+  restore ke `polywatch_restore_test` → 12 tabel, jumlah baris markets
+  & trades cocok.
+
 ### Added — T-018 (E2E + siklus penuh)
 - `tests/e2e/test_core_flow.py`: E2E alur inti dengan DB nyata `polywatch_test`
   + semua sumber palsu — discover_markets, ingest_trades (fake WS + fake RPC
