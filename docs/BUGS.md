@@ -15,7 +15,7 @@
 | BUG-008 | Status market tidak pernah maju (LIVE basi) | critical | Tertutup | `27b62ac` |
 | BUG-009 | Banjir WARNING `payload rusak` dari suplemen Gamma | major | Tertutup | `27b62ac` |
 | BUG-010 | Cacat dokumen: CHANGELOG ganda, T-018/T-027 tidak tercatat | minor | Tertutup | `cc43404` + docs |
-| BUG-011 | Siklus discover penuh 4–5 menit > interval scheduler 30 dtk | major | Dipantau | — |
+| BUG-011 | Siklus discover penuh 4–5 menit > interval scheduler 30 dtk | major | Tertutup | `0901f0f` + `6a802b1` |
 
 ---
 
@@ -125,8 +125,19 @@
 
 - **Gejala:** satu siklus discover penuh (8–10 aset × 2 timeframe × beberapa jendela) memakan ~4–5 menit, sedangkan `DISCOVER_INTERVAL_S` = 30 detik. Efek samping: market baru sempat tersimpan `UPCOMING` dan jendelanya sudah berjalan sebelum siklus berikutnya.
 - **Dampak saat ini:** tidak mematikan sistem — `SweepMarketStatus` dua arah menambal transisi status, dan ingest memakai jendela waktu. Namun market bisa terlambat masuk pantauan sampai ~1 jendela.
-- **Rencana:** paralelisasi permintaan per aset (batas ≤5 req/s), atau naikkan interval discover ke 120–180 dtk sambil mempersingkat jumlah jendela ke depan.
-- **Status:** Dipantau (technical debt, bukan blocker MVP).
+- **Akar masalah tambahan yang ditemukan saat perbaikan:** throttle Gamma memakai `time.sleep` (blocking) di dalam event loop, sehingga `asyncio.gather` tetap berjalan serial; throttle juga tidak dipanggil di jalur fetch yang sebenarnya (dead code). Selain itu `record_result` mem-poll resolusi semua market dalam satu siklus.
+- **Perbaikan (ADR-016):** paralelisasi Gamma dengan `asyncio.Semaphore(GAMMA_MAX_CONCURRENCY=5)`, throttle diganti `asyncio.sleep` dan dipasang di jalur fetch nyata, `RESULT_BATCH_SIZE=10` market per siklus (sisanya `deferred`), sweep dibatch 50, jendela discovery dibatasi, cache negatif aset mati (TTL 10 mnt), ambang kesehatan adaptif `max(3 × durasi siklus terukur, floor)`, dan log `duration_ms` tiap siklus.
+- **Bukti perbaikan (run verifikasi saya, satu instance, 7 menit, 16:46–16:53Z):**
+  ```
+  discover: n=6  median 16.804 ms  max 18.123 ms
+  result:   n=7  median  5.770 ms  max  9.461 ms
+  recompute: n=30 median      6 ms  max  3.039 ms
+  health_stale = 0 · ERROR = 0
+  trades 19.215 → 29.057 (+9.842), 5.359 di antaranya 5 menit terakhir
+  market LIVE aktif = 16 · market LIVE basi = 0
+  market_results 717 → 747
+  ```
+- **Status:** Tertutup — `0901f0f`, `09d0dfb`, `6a802b1`.
 
 ---
 
