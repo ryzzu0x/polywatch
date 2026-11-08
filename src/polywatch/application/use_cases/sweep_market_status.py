@@ -35,6 +35,9 @@ from polywatch.domain.market import (
 
 logger = logging.getLogger(__name__)
 
+#: T-029/ADR-016: default jumlah kandidat yang di-sweep per siklus.
+DEFAULT_SWEEP_BATCH = 50
+
 
 @dataclass(frozen=True, slots=True)
 class SweepSummary:
@@ -42,21 +45,38 @@ class SweepSummary:
 
     closed: int
     started: int
+    duration_ms: int
+    scanned: int
 
 
 class SweepMarketStatus:
-    """Selaraskan status market UPCOMING/LIVE dengan jendela waktunya."""
+    """Selaraskan status market UPCOMING/LIVE dengan jendela waktunya.
 
-    def __init__(self, repository: MarketRepository, clock: Clock) -> None:
+    T-029: maksimum `batch_size` kandidat per siklus (default 50, urut
+    `end_at` paling lama dulu — market paling telat ditutup lebih dulu);
+    sisanya siklus berikutnya.
+    """
+
+    def __init__(
+        self,
+        repository: MarketRepository,
+        clock: Clock,
+        *,
+        batch_size: int = DEFAULT_SWEEP_BATCH,
+    ) -> None:
         self._repository = repository
         self._clock = clock
+        self._batch_size = max(batch_size, 1)
 
     async def execute(self) -> SweepSummary:
         """Sweep kandidat; return jumlah yang ditutup dan dibuka."""
+        import time as _time
+
+        started = _time.monotonic()
         now = self._clock.now()
-        candidates = await self._repository.list_stale_open(now)
+        candidates = (await self._repository.list_stale_open(now))[: self._batch_size]
         closed = 0
-        started = 0
+        started_count = 0
         for item in candidates:
             try:
                 expected = status_at(MarketSlug.parse(item.slug), now)
@@ -73,7 +93,7 @@ class SweepMarketStatus:
             if new_status is MarketStatus.CLOSED:
                 closed += 1
             else:
-                started += 1
+                started_count += 1
             logger.info(
                 "status market di-sweep",
                 extra={
@@ -84,11 +104,23 @@ class SweepMarketStatus:
                     "to_status": new_status.value,
                 },
             )
+        summary = SweepSummary(
+            closed=closed,
+            started=started_count,
+            duration_ms=round((_time.monotonic() - started) * 1000),
+            scanned=len(candidates),
+        )
         logger.info(
             "sweep status market selesai",
-            extra={"event": "market_sweep_done", "closed": closed, "started": started},
+            extra={
+                "event": "market_sweep_done",
+                "closed": summary.closed,
+                "started": summary.started,
+                "scanned": summary.scanned,
+                "duration_ms": summary.duration_ms,
+            },
         )
-        return SweepSummary(closed=closed, started=started)
+        return summary
 
 
-__all__ = ["SweepMarketStatus", "SweepSummary"]
+__all__ = ["DEFAULT_SWEEP_BATCH", "SweepMarketStatus", "SweepSummary"]

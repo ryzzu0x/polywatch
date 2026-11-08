@@ -36,18 +36,30 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     #: Interval scheduler (detik) — siklus penuh discover/resolve/skor.
-    discover_interval_s: float = Field(default=30.0, alias="DISCOVER_INTERVAL_S")
-    result_interval_s: float = Field(default=30.0, alias="RESULT_INTERVAL_S")
+    #: T-029/ADR-016: default dinaikkan 30 → 60 dtk; siklus berbatas
+    #: (batch + paralelisasi) target < 60 dtk, interval 60 dtk memberi
+    #: ruang tanpa menumpuk siklus.
+    discover_interval_s: float = Field(default=60.0, alias="DISCOVER_INTERVAL_S")
+    result_interval_s: float = Field(default=60.0, alias="RESULT_INTERVAL_S")
     heartbeat_interval_s: float = Field(default=60.0, alias="HEARTBEAT_INTERVAL_S")
 
-    #: Health monitor (T-019/T-027): ambang basi, rate limit, grace period.
+    #: Health monitor (T-019/T-027/T-029): ambang basi, rate limit, grace.
     #: T-027: kesegaran ingest diukur dari HEARTBEAT ingest (batch commit /
-    #: siklus WS aktif), bukan trade market LIVE — ambang dinaikkan ke 600 dtk.
+    #: siklus WS aktif), bukan trade market LIVE — ambang 600 dtk.
+    #: T-029/ADR-016: ambang discover/result ADAPTIF — floor dari Settings,
+    #: efektif = max(3x durasi siklus terukur, floor). Default floor 300 dtk.
     stale_ingest_s: float = Field(default=600.0, alias="STALE_INGEST_S")
-    stale_discover_s: float = Field(default=180.0, alias="STALE_DISCOVER_S")
+    stale_discover_s: float = Field(default=300.0, alias="STALE_DISCOVER_S")
+    stale_result_s: float = Field(default=300.0, alias="STALE_RESULT_S")
     health_rate_limit_s: float = Field(default=600.0, alias="HEALTH_RATE_LIMIT_S")
     health_grace_s: float = Field(default=300.0, alias="HEALTH_GRACE_S")
     health_check_interval_s: float = Field(default=30.0, alias="HEALTH_CHECK_INTERVAL_S")
+
+    #: T-029/ADR-016: batas kerja per siklus + paralelisasi Gamma.
+    #: Konkurensi maksimum request Gamma (semaphore; pacing tetap ≤5 req/s).
+    gamma_max_concurrency: int = Field(default=5, alias="GAMMA_MAX_CONCURRENCY")
+    #: Maksimum market CLOSED yang diproses record_result + sweep per siklus.
+    result_batch_size: int = Field(default=10, alias="RESULT_BATCH_SIZE")
 
     #: State notifikasi health persisten antar-restart (T-027, ADR-014):
     #: file JSON kecil — restart berulang tidak memicu spam alarm.

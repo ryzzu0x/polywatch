@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_POLL_INTERVAL_SEC = 30.0
 DEFAULT_TIMEOUT_SEC = 15 * 60.0
 UNAVAILABLE_PRICE_SOURCE = "unavailable"
+#: T-029/ADR-016: default jumlah market CLOSED yang diproses per siklus.
+DEFAULT_BATCH_SIZE = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +58,16 @@ class RecordResultSummary:
     market_id: int
     slug: str
     status: str  # "resolved" | "timeout"
+
+
+@dataclass(frozen=True, slots=True)
+class RecordResultCycleSummary:
+    """Ringkasan satu siklus record_result (T-029) untuk log/audit."""
+
+    processed: int
+    resolved: int
+    timeout: int
+    duration_ms: int
 
 
 @dataclass(slots=True)
@@ -71,6 +83,10 @@ class RecordResult:
     clock: Clock | None = None
     poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC
     timeout_sec: float = DEFAULT_TIMEOUT_SEC
+    #: T-029/ADR-016: maksimum market CLOSED yang diproses per siklus —
+    #: sisanya ditangani siklus berikutnya supaya loop tidak pernah
+    #: lebih lama dari interval.
+    batch_size: int = DEFAULT_BATCH_SIZE
     sleep: Callable[[float], Awaitable[None]] | None = None  # di-inject test
     _notified: set[int] = field(default_factory=set, repr=False)
 
@@ -95,15 +111,43 @@ class RecordResult:
             await self._sleep(self.poll_interval_sec)
             elapsed += self.poll_interval_sec
 
-    async def execute(self) -> list[RecordResultSummary]:
-        """Proses semua market CLOSED yang belum punya market_results."""
-        pending = await self.repository.list_pending_resolution(limit=100)
+    async def execute(self) -> Sequence[RecordResultSummary | RecordResultCycleSummary]:
+        """Proses market CLOSED yang belum punya market_results — batch terbatas.
+
+        T-029: maksimum `batch_size` market per siklus (default 10);
+        sisanya ditangani siklus berikutnya. Return list ringkasan per
+        market + satu `RecordResultCycleSummary` di akhir (durasi siklus).
+        """
+        import time as _time
+
+        started = _time.monotonic()
+        pending = await self.repository.list_pending_resolution(limit=self._effective_batch())
         results: list[RecordResultSummary] = []
         for item in pending:
             if await self.repository.has_result(item.market_id):
                 continue  # sudah terarsip: idempoten lintas siklus
             results.append(await self.execute_once(_pending_to_market(item), item.market_id))
-        return results
+        cycle = RecordResultCycleSummary(
+            processed=len(results),
+            resolved=sum(1 for r in results if r.status == "resolved"),
+            timeout=sum(1 for r in results if r.status == "timeout"),
+            duration_ms=round((_time.monotonic() - started) * 1000),
+        )
+        logger.info(
+            "record_result selesai",
+            extra={
+                "event": "record_result_cycle",
+                "processed": cycle.processed,
+                "resolved": cycle.resolved,
+                "timeout": cycle.timeout,
+                "batch_size": self._effective_batch(),
+                "duration_ms": cycle.duration_ms,
+            },
+        )
+        return [*results, cycle]
+
+    def _effective_batch(self) -> int:
+        return max(self.batch_size, 1)
 
     async def _record(self, market: Market, market_id: int, snapshot: MarketResultSnapshot) -> None:
         """Simpan market_results + transisi status ke RESOLVED (idempoten)."""
@@ -205,9 +249,11 @@ def _pending_to_market(item: PendingMarket) -> Market:
 
 
 __all__ = [
+    "DEFAULT_BATCH_SIZE",
     "DEFAULT_POLL_INTERVAL_SEC",
     "DEFAULT_TIMEOUT_SEC",
     "UNAVAILABLE_PRICE_SOURCE",
     "RecordResult",
+    "RecordResultCycleSummary",
     "RecordResultSummary",
 ]

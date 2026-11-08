@@ -45,10 +45,13 @@ from polywatch.application.ports import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_STALE_INGEST_SEC = 600.0
-DEFAULT_STALE_DISCOVER_SEC = 180.0
+DEFAULT_STALE_DISCOVER_SEC = 300.0
+DEFAULT_STALE_RESULT_SEC = 300.0
 DEFAULT_RATE_LIMIT_SEC = 600.0
 #: Grace period setelah start: tanpa data sama sekali, jangan langsung alarm.
 DEFAULT_GRACE_SEC = 300.0
+#: T-029/ADR-016: ambang adaptif = max(3x durasi siklus terukur, floor).
+ADAPTIVE_STALE_MULTIPLIER = 3.0
 
 CycleKind = Literal["ingest", "discover", "result"]
 
@@ -131,6 +134,7 @@ class HealthMonitor:
         clock: Clock,
         stale_ingest_s: float = DEFAULT_STALE_INGEST_SEC,
         stale_discover_s: float = DEFAULT_STALE_DISCOVER_SEC,
+        stale_result_s: float = DEFAULT_STALE_RESULT_SEC,
         rate_limit_s: float = DEFAULT_RATE_LIMIT_SEC,
         grace_s: float = DEFAULT_GRACE_SEC,
         state_store: NotificationStore | None = None,
@@ -139,7 +143,14 @@ class HealthMonitor:
         self._notifier = notifier
         self._clock = clock
         self._stale_ingest_s = max(stale_ingest_s, 0.0)
-        self._stale_discover_s = max(stale_discover_s, 0.0)
+        # T-029/ADR-016: `stale_discover_s`/`stale_result_s` adalah FLOOR —
+        # ambang efektif = max(3x durasi siklus terukur, floor). Scheduler
+        # melaporkan durasi via `record_cycle(kind, ok, duration_s)`.
+        self._stale_floor: dict[str, float] = {
+            "discover": max(stale_discover_s, 0.0),
+            "result": max(stale_result_s, 0.0),
+        }
+        self._last_cycle_duration_s: dict[str, float] = {}
         self._rate_limit_s = max(rate_limit_s, 0.0)
         self._grace_s = max(grace_s, 0.0)
         self._state_store = state_store
@@ -199,14 +210,36 @@ class HealthMonitor:
             # save() sudah me-log kegagalan internalnya di adapter
             logger.debug("state notifikasi tidak tersimpan", extra={"component": name})
 
-    async def record_cycle(self, kind: CycleKind, ok: bool) -> None:
+    def effective_stale_s(self, name: str) -> float:
+        """Ambang basi efektif untuk satu komponen (T-029/ADR-016).
+
+        `ingest` statis; `discover`/`result` adaptif:
+        `max(3x durasi siklus terukur terakhir, floor dari Settings)`.
+        Tanpa durasi terukur → floor.
+        """
+        if name == "ingest":
+            return self._stale_ingest_s
+        floor = self._stale_floor.get(name, DEFAULT_STALE_DISCOVER_SEC)
+        duration = self._last_cycle_duration_s.get(name)
+        if duration is None:
+            return floor
+        return max(ADAPTIVE_STALE_MULTIPLIER * duration, floor)
+
+    async def record_cycle(
+        self, kind: CycleKind, ok: bool, duration_s: float | None = None
+    ) -> None:
         """Catat hasil siklus/heartbeat; hanya sukses dihitung sebagai aktivitas.
 
         `kind="ingest"` dipakai untuk heartbeat ingest (batch commit /
         siklus WS aktif, ADR-014). Keberhasilan meng-update `last_ok`;
         kegagalan tidak — penilaian stale tetap lewat `check()`.
+
+        T-029: `duration_s` (detik) dipakai untuk ambang adaptif — siklus
+        yang wajar lebih panjang dari floor tidak lagi memicu alarm palsu.
         """
         state = self._state[kind]
+        if duration_s is not None and kind in self._stale_floor:
+            self._last_cycle_duration_s[kind] = max(duration_s, 0.0)
         if not ok:
             return
         now = self._clock.now()
@@ -231,10 +264,8 @@ class HealthMonitor:
             )
         report: list[ComponentHealth] = []
         for name in _COMPONENTS:
-            last, stale_sec = (
-                self._state[name].last_ok,
-                (self._stale_ingest_s if name == "ingest" else self._stale_discover_s),
-            )
+            last = self._state[name].last_ok
+            stale_sec = self.effective_stale_s(name)
             if name == "ingest" and live_markets == 0:
                 # T-027: tanpa market LIVE tidak ada yang bisa di-ingest —
                 # jangan alarm; heartbeat tetap dicatat.
@@ -300,10 +331,12 @@ class HealthMonitor:
 
 
 __all__ = [
+    "ADAPTIVE_STALE_MULTIPLIER",
     "DEFAULT_GRACE_SEC",
     "DEFAULT_RATE_LIMIT_SEC",
     "DEFAULT_STALE_DISCOVER_SEC",
     "DEFAULT_STALE_INGEST_SEC",
+    "DEFAULT_STALE_RESULT_SEC",
     "ComponentHealth",
     "CycleKind",
     "HealthMonitor",

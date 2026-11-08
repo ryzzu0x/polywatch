@@ -210,6 +210,7 @@ class Container:
                     clock=self.clock,
                     known_assets=SqlAlchemyMarketRepository(self.scoped_session()),
                     default_assets=self.settings.market_assets,
+                    max_concurrency=self.settings.gamma_max_concurrency,
                     # T-028/ADR-010: suplemen list-endpoint TIDAK dipasang —
                     # sumber kebenaran slug per jendela; suplemen hanya
                     # menghasilkan ribuan payload rusak + request sia-sia.
@@ -228,6 +229,7 @@ class Container:
                 sweep = SweepMarketStatus(
                     repository=SqlAlchemyMarketRepository(self.scoped_session()),
                     clock=self.clock,
+                    batch_size=self.settings.result_batch_size,
                 )
                 await sweep.execute()
                 record = RecordResult(
@@ -236,10 +238,11 @@ class Container:
                     primary_price=PolymarketPriceSource(),
                     fallback_price=BinancePriceSource(),
                     clock=self.clock,
+                    batch_size=self.settings.result_batch_size,
                 )
                 summaries = await record.execute()
                 await self._session_commit()
-                return summaries
+                return list(summaries)
             finally:
                 await self.release_session()
 
@@ -316,6 +319,7 @@ class Container:
             clock=self.clock,
             stale_ingest_s=self.settings.stale_ingest_s,
             stale_discover_s=self.settings.stale_discover_s,
+            stale_result_s=self.settings.stale_result_s,
             rate_limit_s=self.settings.health_rate_limit_s,
             grace_s=self.settings.health_grace_s,
             state_store=JsonHealthStateStore(self.settings.health_state_file),

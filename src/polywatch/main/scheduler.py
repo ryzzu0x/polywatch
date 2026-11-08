@@ -44,9 +44,11 @@ RecomputeCycle = Callable[[int], Awaitable[object]]
 
 
 class HealthReporter(Protocol):
-    """Penerima laporan siklus scheduler (mis. HealthMonitor, T-019)."""
+    """Penerima laporan siklus scheduler (mis. HealthMonitor, T-019/T-029)."""
 
-    async def record_cycle(self, kind: CycleKind, ok: bool) -> None: ...
+    async def record_cycle(
+        self, kind: CycleKind, ok: bool, duration_s: float | None = None
+    ) -> None: ...
 
 
 def _resolved_ids(summaries: object) -> list[int]:
@@ -62,29 +64,51 @@ def _resolved_ids(summaries: object) -> list[int]:
     return ids
 
 
-async def _run_cycle(name: str, cycle: Callable[[], Awaitable[object]]) -> tuple[bool, object]:
-    """Jalankan satu siklus; return (sukses, hasil). Exception di-log, tidak diteruskan."""
+async def _run_cycle(
+    name: str, cycle: Callable[[], Awaitable[object]]
+) -> tuple[bool, object, float]:
+    """Jalankan satu siklus; return (sukses, hasil, durasi detik).
+
+    Exception di-log, tidak diteruskan.
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
     try:
-        return True, await cycle()
+        result = await cycle()
+        return True, result, loop.time() - started
     except Exception:
         logger.exception(
             "siklus scheduler gagal",
             extra={"event": "scheduler_cycle_error", "cycle": name},
         )
-        return False, None
+        return False, None, loop.time() - started
 
 
-async def _report(monitor: HealthReporter | None, kind: CycleKind, ok: bool) -> None:
+async def _report(
+    monitor: HealthReporter | None, kind: CycleKind, ok: bool, duration_s: float | None = None
+) -> None:
     """Laporkan hasil siklus ke health monitor; gagal lapor tidak mengganggu loop."""
     if monitor is None:
         return
     try:
-        await monitor.record_cycle(kind, ok)
+        await monitor.record_cycle(kind, ok, duration_s)
     except Exception:
         logger.exception(
             "laporan siklus ke health monitor gagal",
             extra={"event": "health_report_error", "cycle": kind},
         )
+
+
+def _log_duration(name: str, duration_s: float) -> None:
+    """Log durasi siklus (T-029) — `duration_ms` untuk audit performa."""
+    logger.info(
+        "durasi siklus",
+        extra={
+            "event": "scheduler_cycle_duration",
+            "cycle": name,
+            "duration_ms": round(duration_s * 1000),
+        },
+    )
 
 
 async def _wait(stop_event: asyncio.Event, interval_sec: float) -> None:
@@ -101,8 +125,9 @@ async def discover_loop(
 ) -> None:
     """Loop discover market: jalan segera lalu tiap interval."""
     while not stop_event.is_set():
-        ok, _ = await _run_cycle("discover", discover)
-        await _report(monitor, "discover", ok)
+        ok, _, duration = await _run_cycle("discover", discover)
+        _log_duration("discover", duration)
+        await _report(monitor, "discover", ok, duration)
         await _wait(stop_event, interval_sec)
     logger.info(
         "loop discover berhenti", extra={"event": "scheduler_loop_stop", "cycle": "discover"}
@@ -118,14 +143,16 @@ async def result_loop(
 ) -> None:
     """Loop result: resolve market CLOSED baru, lalu recompute market itu."""
     while not stop_event.is_set():
-        ok, summaries = await _run_cycle("record_result", record_result)
-        await _report(monitor, "result", ok)
+        ok, summaries, duration = await _run_cycle("record_result", record_result)
+        _log_duration("result", duration)
+        await _report(monitor, "result", ok, duration)
         for market_id in _resolved_ids(summaries):
 
             async def _recompute_once(mid: int = market_id) -> object:
                 return await recompute(mid)
 
-            await _run_cycle("recompute_scores", _recompute_once)
+            _, _, recompute_duration = await _run_cycle("recompute_scores", _recompute_once)
+            _log_duration("recompute", recompute_duration)
         await _wait(stop_event, interval_sec)
     logger.info("loop result berhenti", extra={"event": "scheduler_loop_stop", "cycle": "result"})
 

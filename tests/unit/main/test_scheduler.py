@@ -40,7 +40,7 @@ class FakeMonitor:
     def __init__(self) -> None:
         self.reports: list[tuple[str, bool]] = []
 
-    async def record_cycle(self, kind: str, ok: bool) -> None:
+    async def record_cycle(self, kind: str, ok: bool, duration_s: float | None = None) -> None:
         self.reports.append((kind, ok))
 
 

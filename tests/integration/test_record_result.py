@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from polywatch.application.use_cases.record_result import RecordResult
+from polywatch.application.use_cases.record_result import RecordResult, RecordResultSummary
 from polywatch.domain.market import MarketStatus
 from polywatch.infrastructure.db.models import AssetModel, Base, MarketModel, MarketResultModel
 from polywatch.infrastructure.db.repositories.market_repository import (
@@ -143,7 +143,7 @@ async def test_record_result_end_to_end_sukses(session: AsyncSession) -> None:
     summaries = await use_case.execute()
     await session.commit()
 
-    assert [s.status for s in summaries] == ["resolved"]
+    assert [s.status for s in summaries if isinstance(s, RecordResultSummary)] == ["resolved"]
     assert await _count(session, MarketResultModel) == 1
     row = (
         await session.execute(
@@ -213,7 +213,7 @@ async def test_record_result_retry_sebelum_resolved(session: AsyncSession) -> No
     summaries = await use_case.execute()
     await session.commit()
 
-    assert [s.status for s in summaries] == ["resolved"]
+    assert [s.status for s in summaries if isinstance(s, RecordResultSummary)] == ["resolved"]
     assert route.call_count == 2
     assert sleep.calls == 1  # satu jeda retry
     assert await _count(session, MarketResultModel) == 1
@@ -241,7 +241,7 @@ async def test_record_result_timeout_notifikasi_owner(session: AsyncSession) -> 
     summaries = await use_case.execute()
     await session.commit()
 
-    assert [s.status for s in summaries] == ["timeout"]
+    assert [s.status for s in summaries if isinstance(s, RecordResultSummary)] == ["timeout"]
     assert len(notifier.sent) == 1
     assert SLUG in notifier.sent[0]
     assert await _count(session, MarketResultModel) == 0  # tidak ada hasil palsu

@@ -193,7 +193,7 @@ async def test_monitor_record_cycle_diterima_lewat_container_urutan_cli(
         def __init__(self) -> None:
             self.calls: list[tuple[str, bool]] = []
 
-        async def record_cycle(self, kind: str, ok: bool) -> None:
+        async def record_cycle(self, kind: str, ok: bool, duration_s: float | None = None) -> None:
             self.calls.append((kind, ok))
 
     with respx.mock(base_url=GAMMA) as mock:
@@ -250,7 +250,7 @@ async def test_heartbeat_ingest_diteruskan_ke_monitor_container(
         def __init__(self) -> None:
             self.calls: list[tuple[str, bool]] = []
 
-        async def record_cycle(self, kind: str, ok: bool) -> None:
+        async def record_cycle(self, kind: str, ok: bool, duration_s: float | None = None) -> None:
             self.calls.append((kind, ok))
 
     recorder = _RecordingMonitor()

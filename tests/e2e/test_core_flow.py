@@ -53,7 +53,7 @@ from polywatch.application.use_cases.discover_markets import DiscoverMarkets
 from polywatch.application.use_cases.evaluate_alert import EvaluateAlert
 from polywatch.application.use_cases.ingest_trades import IngestTrades
 from polywatch.application.use_cases.recompute_scores import RecomputeScores
-from polywatch.application.use_cases.record_result import RecordResult
+from polywatch.application.use_cases.record_result import RecordResult, RecordResultSummary
 from polywatch.domain.market import MarketStatus, Outcome, Timeframe
 from polywatch.domain.scoring import (
     ScoringPolicy,
@@ -442,7 +442,7 @@ async def test_e2e_core_flow(session: AsyncSession) -> None:
     )
     results = await record_result.execute()
     await session.commit()
-    assert [r.status for r in results] == ["resolved"]
+    assert [r.status for r in results if isinstance(r, RecordResultSummary)] == ["resolved"]
     saved_result = await markets.get_result(live_market_id)
     assert saved_result is not None
     assert saved_result.result is Outcome.DOWN  # dari resolusi resmi (fake Gamma)
@@ -535,7 +535,7 @@ async def test_e2e_core_flow(session: AsyncSession) -> None:
     )
     summaries = await record_unresolved.execute()
     await session.commit()
-    statuses = [r.status for r in summaries]
+    statuses = [r.status for r in summaries if isinstance(r, RecordResultSummary)]
     assert "resolved" not in statuses  # tidak ada result palsu
     assert await markets.get_result(upcoming_market_id) is None
     # Market kedua (upcoming → closed) diproses tapi resolusinya belum keluar.

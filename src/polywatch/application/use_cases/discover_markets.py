@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -39,6 +40,13 @@ DEFAULT_PAST_WINDOWS = 3
 DEFAULT_MAX_END_AGE_HOURS = 6.0
 
 
+#: T-029/ADR-016: default konkurensi request Gamma per siklus discover.
+DEFAULT_MAX_CONCURRENCY = 5
+#: T-029/ADR-016: TTL cache negatif aset (aset tanpa market sama sekali,
+#: mis. xag/xau — tidak di-query ulang selama TTL ini).
+DEFAULT_ASSET_TTL_S = 600.0
+
+
 @dataclass(frozen=True, slots=True)
 class DiscoverySummary:
     """Ringkasan satu siklus discovery untuk log/monitoring."""
@@ -47,6 +55,8 @@ class DiscoverySummary:
     total_markets: int
     skipped_slugs: int
     stale_filtered: int
+    duration_ms: int
+    dead_asset_skips: int
 
 
 class SlugSource(Protocol):
@@ -78,6 +88,16 @@ class DiscoverMarkets:
     past_windows: int = DEFAULT_PAST_WINDOWS
     max_end_age_hours: float = DEFAULT_MAX_END_AGE_HOURS
     fetch_delay_s: float = 0.25
+    #: T-029: konkurensi maksimum request Gamma per siklus (semaphore).
+    #: Pacing per-request tetap dijaga adapter Gamma (≤5 req/s).
+    max_concurrency: int = DEFAULT_MAX_CONCURRENCY
+    #: T-029: TTL cache negatif aset — aset tanpa satu pun market tidak
+    #: di-query ulang sampai TTL habis.
+    dead_asset_ttl_s: float = DEFAULT_ASSET_TTL_S
+    #: Clock monoton untuk cache negatif (di-inject test).
+    monotonic: Callable[[], float] = time.monotonic
+    #: Cache negatif aset: symbol → waktu monoton penandaan mati.
+    _dead_until: dict[str, float] = field(default_factory=dict, repr=False)
     #: Sleep antar-request — di-inject test (no-op) untuk jalan instan.
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     #: Sumber cadangan list-endpoint — OPT-IN, default None (T-028/ADR-010:
@@ -87,6 +107,7 @@ class DiscoverMarkets:
     supplement_source: MarketSource | None = None
 
     async def execute(self) -> DiscoverySummary:
+        started = self.monotonic()
         now = self.clock.now()
         assets = await self._assets()
         saved: dict[str, MarketSnapshot] = {}
@@ -94,29 +115,64 @@ class DiscoverMarkets:
         total_markets = 0
         skipped_slugs = 0
         stale_filtered = 0
+        dead_asset_skips = 0
 
+        # T-029: kandidat slug dihitung dulu (skip aset mati via cache
+        # negatif), lalu semua fetch dijalankan paralel dengan semaphore.
+        candidates: list[tuple[str, bool]] = []  # (slug, closed)
+        active_assets: list[str] = []
         for asset in assets:
+            if self._is_dead(asset):
+                dead_asset_skips += 1
+                logger.debug(
+                    "aset tanpa market di-skip (cache negatif)",
+                    extra={"event": "discover_dead_asset_skip", "asset": asset},
+                )
+                continue
+            active_assets.append(asset)
             for timeframe in self.timeframes:
                 for offset in range(-self.past_windows, self.ahead_windows + 1):
                     slug = self._slug_for(asset, timeframe, now, offset)
-                    snapshot = await self.source.fetch_by_slug(slug, closed=offset < 0)
-                    if snapshot is None:
-                        continue  # jendela tanpa market — normal
-                    if self._stale_slug(slug, now) is None:
-                        stale_filtered += 1
-                        logger.warning(
-                            "market basi di-skip",
-                            extra={"event": "skipped_stale", "slug": slug},
-                        )
-                        continue
-                    is_new, is_ok = await self._save(slug, snapshot, now)
-                    if is_ok:
-                        saved[slug] = snapshot
-                        total_markets += 1
-                        new_markets += int(is_new)
-                    else:
-                        skipped_slugs += 1
-                    await self.sleep(self.fetch_delay_s)
+                    candidates.append((slug, offset < 0))
+
+        semaphore = asyncio.Semaphore(max(self.max_concurrency, 1))
+
+        async def _fetch(slug: str, closed: bool) -> tuple[str, MarketSnapshot | None]:
+            async with semaphore:
+                snapshot = await self.source.fetch_by_slug(slug, closed=closed)
+            await self.sleep(self.fetch_delay_s)
+            return slug, snapshot
+
+        fetched = await asyncio.gather(*(_fetch(slug, closed) for slug, closed in candidates))
+
+        for slug, snapshot in fetched:
+            if snapshot is None:
+                continue  # jendela tanpa market — normal
+            if self._stale_slug(slug, now) is None:
+                stale_filtered += 1
+                logger.warning(
+                    "market basi di-skip",
+                    extra={"event": "skipped_stale", "slug": slug},
+                )
+                continue
+            is_new, is_ok = await self._save(slug, snapshot, now)
+            if is_ok:
+                saved[slug] = snapshot
+                total_markets += 1
+                new_markets += int(is_new)
+            else:
+                skipped_slugs += 1
+
+        # T-029: cache negatif — aset aktif yang tidak menemukan satu pun
+        # market ditandai mati untuk TTL; aset yang menemukan market
+        # dihapus dari cache (positif kembali langsung di-query).
+        found_assets = {MarketSlug.parse(slug).asset.symbol for slug in saved}
+        now_mono = self.monotonic()
+        for asset in active_assets:
+            if asset in found_assets:
+                self._dead_until.pop(asset, None)
+            else:
+                self._dead_until[asset] = now_mono + self.dead_asset_ttl_s
 
         # Supplement (opsional): list-endpoint. Hasilnya wajib lolos filter
         # anti-stale — slug cocok pola updown DAN endDate ±max_end_age_hours.
@@ -145,6 +201,8 @@ class DiscoverMarkets:
             total_markets=total_markets,
             skipped_slugs=skipped_slugs,
             stale_filtered=stale_filtered,
+            duration_ms=round((self.monotonic() - started) * 1000),
+            dead_asset_skips=dead_asset_skips,
         )
         logger.info(
             "discover_markets selesai",
@@ -153,9 +211,17 @@ class DiscoverMarkets:
                 "total_markets": summary.total_markets,
                 "skipped_slugs": summary.skipped_slugs,
                 "stale_filtered": summary.stale_filtered,
+                "duration_ms": summary.duration_ms,
+                "dead_asset_skips": summary.dead_asset_skips,
             },
         )
         return summary
+
+    def _is_dead(self, asset: str) -> bool:
+        """Aset dalam masa cache negatif (T-029) — tanpa market pada siklus
+        terakhir dan TTL belum habis."""
+        until = self._dead_until.get(asset)
+        return until is not None and self.monotonic() < until
 
     async def _save(self, slug: str, snapshot: MarketSnapshot, now: datetime) -> tuple[bool, bool]:
         """Upsert satu market.
@@ -222,6 +288,8 @@ def build_slug(asset: str, timeframe: Timeframe, start: datetime) -> str:
 
 __all__ = [
     "DEFAULT_AHEAD_WINDOWS",
+    "DEFAULT_ASSET_TTL_S",
+    "DEFAULT_MAX_CONCURRENCY",
     "DEFAULT_MAX_END_AGE_HOURS",
     "DEFAULT_PAST_WINDOWS",
     "DiscoverMarkets",

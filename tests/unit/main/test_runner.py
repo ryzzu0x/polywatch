@@ -51,7 +51,9 @@ class FakeHealthMonitor(HealthMonitor):
             raise RuntimeError("check boom")
         return None
 
-    async def record_cycle(self, kind: str, ok: bool) -> None:  # pragma: no cover
+    async def record_cycle(
+        self, kind: str, ok: bool, duration_s: float | None = None
+    ) -> None:  # pragma: no cover
         return None
 
 
