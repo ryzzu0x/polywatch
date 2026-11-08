@@ -6,6 +6,7 @@ from polywatch.application.ports.repositories import (
     AlertSettingsRepository,
     MarketRepository,
     TradeRepository,
+    UserRepository,
     WalletStatsRepository,
     WatchConfigRepository,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "PriceSource",
     "TradeRepository",
     "TradeSource",
+    "UserRepository",
     "WalletStatsRepository",
     "WatchConfigRepository",
 ]

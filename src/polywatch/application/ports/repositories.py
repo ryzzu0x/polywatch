@@ -6,7 +6,9 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
-from polywatch.domain.market import Market, MarketStatus, Timeframe
+from polywatch.application.dto.market import PendingMarket
+from polywatch.application.dto.settings import WatchEntry
+from polywatch.domain.market import Market, MarketResult, MarketStatus, Timeframe
 from polywatch.domain.scoring import WalletStats
 from polywatch.domain.trade import Trade
 
@@ -17,6 +19,26 @@ class MarketRepository(Protocol):
     async def get_by_slug(self, slug: str) -> Market | None: ...
 
     async def list_by_status(self, status: MarketStatus) -> Sequence[Market]: ...
+
+    async def get_result(self, market_id: int) -> MarketResult | None: ...
+
+    async def save_result(self, result: MarketResult) -> None: ...
+
+    async def update_status(self, market_id: int, status: MarketStatus) -> None: ...
+
+    async def has_result(self, market_id: int) -> bool: ...
+
+    async def list_pending_resolution(self, limit: int) -> Sequence[PendingMarket]:
+        """Market CLOSED tanpa market_results, siap diproses record_result."""
+        ...
+
+
+class UserRepository(Protocol):
+    """Resolusi `users` dari telegram_id (MVP single-owner)."""
+
+    async def get_id_by_telegram(self, telegram_id: int) -> int | None: ...
+
+    async def get_or_create_by_telegram(self, telegram_id: int) -> int: ...
 
 
 class TradeRepository(Protocol):
@@ -43,6 +65,10 @@ class WatchConfigRepository(Protocol):
     async def set_enabled(
         self, user_id: int, asset: str, timeframe: Timeframe, enabled: bool
     ) -> None: ...
+
+    async def list_all(self, user_id: int) -> Sequence[WatchEntry]: ...
+
+    async def asset_exists(self, asset: str) -> bool: ...
 
 
 class AlertSettingsRepository(Protocol):
