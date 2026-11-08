@@ -29,3 +29,28 @@ class InvalidWalletError(DomainError):
     def __init__(self, raw: str) -> None:
         super().__init__(f"alamat wallet tidak valid: {raw!r}")
         self.raw = raw
+
+
+class InvalidMarketStatusTransitionError(DomainError):
+    """Transisi status market tidak legal (mundur atau melompati tahap)."""
+
+    def __init__(self, current: str, target: str) -> None:
+        super().__init__(f"transisi status market ilegal: {current} -> {target}")
+        self.current = current
+        self.target = target
+
+
+class InvalidOutcomePricesError(DomainError):
+    """outcomePrices tidak berbentuk pasangan resolusi [\"1\",\"0\"] / [\"0\",\"1\"]."""
+
+    def __init__(self, raw: object) -> None:
+        super().__init__(f"outcomePrices tidak valid: {raw!r}")
+        self.raw = raw
+
+
+class InvalidResolutionStatusError(DomainError):
+    """umaResolutionStatus memakai nilai yang tidak dikenal."""
+
+    def __init__(self, raw: object) -> None:
+        super().__init__(f"umaResolutionStatus tidak dikenal: {raw!r}")
+        self.raw = raw
