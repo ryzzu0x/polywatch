@@ -129,8 +129,13 @@ Error ditampilkan ke pengguna sebagai pesan singkat; detail (kode + trace id) ma
 ## 6. Alur Data Utama
 
 ```
-[Scheduler tiap 30 dtk] discover_markets
-   Gamma API (slug {aset}-updown-{tf}-{unix}) → upsert markets (upcoming/live)
+[Scheduler tiap 30 dtk] discover_markets (T-024: berbasis slug per jendela waktu)
+   aset = tabel assets ∪ Settings.MARKET_ASSETS; untuk tiap (aset, timeframe):
+   window start = floor(now/durasi)*durasi → GET /markets?slug=<slug>
+   jendela berjalan + 2 ke depan (closed=false) → upsert markets (live/upcoming)
+   jendela 3 ke belakang (closed=true) → upsert markets (closed, untuk record_result)
+   guard anti-stale: slug cocok pola updown DAN endDate ±6 jam → selain itu skipped_stale
+   list-endpoint hanya supplement, wajib lolos filter anti-stale yang sama
 
 [Worker tiap 2–3 dtk per market live] ingest_trades
    Data API /trades?market=<condition_id> (cursor waktu) → insert idempoten trades
@@ -152,7 +157,7 @@ Kegagalan API: retry dengan exponential backoff + jitter; error berulang dikirim
 
 > Diperbarui setelah spike T-005 (2026-11-08) — laporan: `docs/spikes/T-005-sumber-data.md`, keputusan di `DECISIONS.md` ADR-004/ADR-005.
 
-- **Polymarket Gamma API** (`gamma-api.polymarket.com`) — daftar market (`GET /markets?closed=&order=endDate&ascending=&end_date_max|end_date_min=<ISO>`, `limit=100` per halaman), field kunci `conditionId`, `clobTokenIds` (string JSON), `slug` (pola `{aset}-updown-{5m|15m}-{unix_start}` terverifikasi), `outcomePrices`/`outcomes`, `umaResolutionStatus`, `volume` (terisi setelah resolve). Hasil resolusi: query `closed=true` (delay resolve setelah end ±6 menit; market live menghilang dari pencarian slug tanpa `closed=true`).
+- **Polymarket Gamma API** (`gamma-api.polymarket.com`) — discovery utama T-024: `GET /markets?slug=<slug>&closed=<bool>` per jendela waktu (berjalan+2 depan `closed=false`, 3 belakang `closed=true`; throttle ≤5 req/s); endpoint list (`order=endDate` + `end_date_min/max`) hanya supplement dengan filter anti-stale, field kunci `conditionId`, `clobTokenIds` (string JSON), `slug` (pola `{aset}-updown-{5m|15m}-{unix_start}` terverifikasi), `outcomePrices`/`outcomes`, `umaResolutionStatus`, `volume` (terisi setelah resolve). Hasil resolusi: query `closed=true` (delay resolve setelah end ±6 menit; market live menghilang dari pencarian slug tanpa `closed=true`).
 - **Polymarket Data API v2** (`data-api.polymarket.com/v2`) — trade per market: `GET /v2/trades?condition=<conditionId>&limit=500`, pagination **cursor-only** (`next_cursor`), field `proxy_wallet`, `side`, `token_id`, `condition_id`, `size`, `price`, `timestamp`, `outcome`, `outcome_index`, `transaction_hash`. Catatan: v1 sudah pensiun (410); latency trade→tersedia median ±164 s. Insert wajib idempoten (duplikat umum saat polling).
 - **Polymarket CLOB API** — harga/orderbook saat ini (MVP); order (v2).
 - **Sumber harga open/close (ADR-005)** — utama: `GET polymarket.com/api/crypto/crypto-price?symbol=<aset>&eventStartTime=<unix>` (`openPrice`/`closePrice` feed Chainlink selaras resolusi; hanya window aktif — tidak bisa backfill). Cadangan: Binance klines 1m (`api.binance.com/api/v3/klines`). Kolom `price_source` selalu disimpan.

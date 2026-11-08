@@ -5,6 +5,30 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Fixed — T-024 (discovery market melewatkan market live)
+- **Bug:** `discover_markets` menyimpan 0 market Up/Down live. Bukti:
+  `GET /markets?closed=false&order=endDate&ascending=true&end_date_min=<now-1h>`
+  mengembalikan 100 item market jangka panjang (val-bon-..., itf-...) tanpa
+  satu pun slug updown; sementara `end_date_max=<now+60m>` mengembalikan 54
+  item updown yang semuanya market basi Des 2025 (tak pernah ditutup,
+  volume 0). Market live hanya bisa ditemukan deterministik lewat
+  `GET /markets?slug=<slug>` dengan slug jendela waktu.
+- **Perbaikan (ADR-010, discovery berbasis slug per jendela waktu):**
+  untuk tiap (aset, timeframe) dihitung window start =
+  `floor(now/durasi)*durasi`, lalu market dicari per slug untuk jendela
+  berjalan + 2 ke depan (`closed=false`) dan 3 ke belakang
+  (`closed=true` — untuk `record_result`; market live hilang dari
+  pencarian slug setelah end). Aset dari tabel `assets` (port `AssetSource`)
+  ∪ default `Settings.MARKET_ASSETS`; timeframe domain; pembentukan slug
+  (`window_start`/`build_slug`) di application layer — adapter Gamma hanya
+  eksekusi HTTP dengan throttle ≤5 req/s. Jalur cadangan list-endpoint tetap
+  ada sebagai supplement dan wajib lolos filter anti-stale: slug cocok pola
+  updown DAN endDate ±6 jam dari sekarang (log `skipped_stale`) — market basi
+  tidak akan pernah tersimpan lagi.
+- **Verifikasi runtime nyata:** discovery sekali ke Gamma sungguhan menyimpan
+  90 market di DB: 16 LIVE (8 aset × 5m/15m — sebanding 16 yang diukur
+  manual), 32 UPCOMING, 42 CLOSED, 0 market basi.
+
 ### Fixed — T-023 (konkurensi session DB)
 - **Bug:** `/markets` dan `/status` gagal saat update Telegram diproses
   bersamaan — `InvalidRequestError: This session is provisioning a new
