@@ -36,9 +36,9 @@
 
 ## M1 — Discovery Market & Arsip Hasil (F1, F2)
 
-- [ ] **T-006 · Domain Market/Timeframe/Outcome/MarketResult** — S
+- [x] **T-006 · Domain Market/Timeframe/Outcome/MarketResult** — S
   - *Selesai jika:* unit test parsing slug & perhitungan waktu lulus
-- [ ] **T-007 · Gamma client + `discover_markets`** — M
+- [x] **T-007 · Gamma client + `discover_markets`** — M
   - Auto-detect aset dari slug, upsert idempoten
   - *Selesai jika:* integration test (fixture) lulus; 24 jam lokal tanpa market terlewat
 - [ ] **T-008 · `watch_config` + use case pengaturan market** — S
@@ -117,3 +117,5 @@
 | 2026-11-08 | T-003 | Selesai | Runner heartbeat (port Clock, SIGINT/SIGTERM), composition root engine/session DB lazy, redaksi secret di logging JSON, CLI default menjalankan runner; 44 test hijau; branch `feature/m0-fondasi` |
 | 2026-11-08 | T-004 | Selesai | Role `polywatch_app` + DB lokal, model SQLAlchemy 2 async, Alembic (env baca Settings), migrasi awal 11 tabel MVP + index/unique §4; upgrade/downgrade/upgrade bersih; integration test via `TEST_DATABASE_URL` (auto-skip) |
 | 2026-11-08 | T-005 | Selesai | Spike: Data API v1 pensiun (410) → v2 `?condition=` cursor-only, latency trade median 164 s/p90 251 s; ADR-004 Diterima; ADR-005: Polymarket crypto-price (Chainlink) utama + Binance cadangan (41/48); laporan `docs/spikes/T-005-sumber-data.md` |
+| 2026-11-08 | T-006 | Selesai | Entity MarketResult, transisi status upcoming→live→closed→resolved (tolak mundur/lompat), pemetaan outcomePrices + validasi umaResolutionStatus; 25 unit test baru (73 total) |
+| 2026-11-08 | T-007 | Selesai | GammaMarketSource (retry+backoff+jitter, parsing clobTokenIds/outcomes tahan error, jendela end_date now-1j..now+3j, offset ≤2000), use case discover_markets (auto-detect aset/timeframe dari slug), MarketRepository PostgreSQL (upsert ON CONFLICT condition_id, asset auto-create, status tak mundur); verifikasi live discover 2× = 24 market/8 aset/0 duplikat; 106 test hijau |

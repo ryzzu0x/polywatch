@@ -5,6 +5,31 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Added (T-007)
+- `GammaMarketSource` (`infrastructure/polymarket/gamma_client.py`): httpx async
+  dengan retry + exponential backoff + jitter, timeout eksplisit; polling market
+  live sesuai T-005 (`closed=false&order=endDate&ascending=true`), jendela
+  `end_date_min=now-1j`/`end_date_max=now+3j`, paginasi offset dibatasi 2000
+  (Gamma menolak lebih). Parsing `clobTokenIds`/`outcomes` (string JSON) tahan
+  error: market rusak di-log lalu di-skip. Filter timeframe lewat
+  `MarketSlug.parse`.
+- Use case `discover_markets` (`application/use_cases/`): auto-detect
+  aset/timeframe dari slug, slug aneh di-skip tanpa menggagalkan batch, upsert
+  idempoten lewat port `MarketRepository`, log terstruktur new/total/skipped.
+- `SqlAlchemyMarketRepository` (`infrastructure/db/repositories/`): upsert
+  `ON CONFLICT (condition_id)`, asset baru dari slug dibuat otomatis
+  (idempoten), status market tidak pernah mundur saat upsert ulang.
+- Verifikasi live: discover 2× berturut-turut = 24 market, 8 aset, 0 duplikat.
+
+### Added (T-006)
+- Entity `MarketResult` (open/close price `Decimal`, `Outcome`, volume, sumber
+  harga, waktu resolusi) dengan equality/hash.
+- Aturan transisi status market `upcoming → live → closed → resolved`
+  (`can_transition`/`transition_status`/`status_at`); transisi mundur atau
+  melompat ke resolved ditolak.
+- Pemetaan `outcomePrices` Gamma (indeks 0 = Up) ke `Outcome` dan validasi
+  `umaResolutionStatus`.
+
 ### Added (T-005)
 - Spike sumber data: laporan `docs/spikes/T-005-sumber-data.md` + contoh respons
   (`docs/spikes/t005-*.json`) + script probe ulang `scripts/spike/t005_probe.py`
