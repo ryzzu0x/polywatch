@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from polywatch import __version__
+from polywatch.application.dto.market import TokenMarketInfo
 from polywatch.application.ports import (
     AlertSettingsRepository as AlertSettingsRepositoryPort,
 )
@@ -61,6 +62,7 @@ from polywatch.application.use_cases.manage_alerts import ManageAlerts
 from polywatch.application.use_cases.manage_settings import ManageSettings
 from polywatch.application.use_cases.manage_watchlist import ManageWatchlist
 from polywatch.application.use_cases.wallet_views import TopWallets, WalletDetail
+from polywatch.domain.market import Timeframe
 from polywatch.domain.trade import Trade
 from polywatch.infrastructure.clock import SystemClock
 from polywatch.main.config import Settings
@@ -472,7 +474,7 @@ class Container:
     # ------------------------------------------------------------------ ingest
 
     def setup_ingest(self) -> None:
-        """Rakit IngestTrades dengan hook on_saved → evaluate_alert (T-017).
+        """Rakit IngestTrades kontinyu dengan hook on_saved → evaluate_alert (T-017/T-026).
 
         Hook hanya dipasang bila method ini dipanggil; perilaku runner tanpa
         hook tidak berubah. Trade yang tersimpan langsung dievaluasi alert.
@@ -480,6 +482,11 @@ class Container:
         T-023: evaluator alert dibuat per-panggilan `on_saved` dengan session
         task saat ini (ingest dan evaluasi boleh berbagi unit-of-work satu
         siklus, tapi tidak berbagi session dengan task lain).
+
+        T-026: ingest adalah LOOP KONTINYU — satu langganan WS hidup seumur
+        proses, refresh token market live tiap siklus lewat
+        `SqlAlchemyLiveTokenQuery` (semantik watch default-enabled, ADR-012).
+        Runner menjalankan hook sebagai task tunggal (bukan polling berkala).
         """
         from polywatch.application.use_cases.evaluate_alert import EvaluateAlert
         from polywatch.application.use_cases.ingest_trades import IngestTrades
@@ -505,6 +512,7 @@ class Container:
         from polywatch.infrastructure.db.repositories.watchlist_repository import (
             SqlAlchemyWatchlistRepository,
         )
+        from polywatch.infrastructure.polymarket.orderbook_ws import OrderbookWsClient
         from polywatch.infrastructure.polymarket.polygon_rpc import PolygonRpcClient
         from polywatch.infrastructure.polymarket.trade_stream import (
             OrderbookWsAdapter,
@@ -555,36 +563,46 @@ class Container:
             except Exception:
                 logger.exception("commit alert gagal", extra={"event": "alert_commit_error"})
 
-        async def run_ingest_once() -> None:
-            try:
-                from polywatch.domain.market import Timeframe
+        ws_client = OrderbookWsClient()
+        rpc = PolygonRpcClient(alchemy_url=os.environ.get("ALCHEMY_RPC_URL"))
+        container = self
 
-                session = self.scoped_session()
-                live = SqlAlchemyLiveTokenQuery(session)
-                tokens = await live.live_tokens(list(Timeframe))
-                stream = OrderbookWsAdapter()
-                rpc = PolygonRpcClient(
-                    alchemy_url=os.environ.get("ALCHEMY_RPC_URL"),
-                )
+        class _ScopedLiveTokens:
+            """Adapter LiveTokenSource: session per-panggilan + release."""
+
+            async def live_tokens(
+                self, timeframes: Sequence[Timeframe] | None = None
+            ) -> Sequence[TokenMarketInfo]:
+                try:
+                    session = container.scoped_session()
+                    query = SqlAlchemyLiveTokenQuery(session)
+                    wanted = list(timeframes) if timeframes else list(Timeframe)
+                    return list(await query.live_tokens(wanted))
+                finally:
+                    await container.release_session()
+
+        async def run_ingest() -> None:
+            """Loop ingest kontinyu (T-026) — dipanggil sekali oleh runner."""
+            try:
                 ingest = IngestTrades(
-                    stream=stream,
+                    stream=OrderbookWsAdapter(ws_client),
                     receipts=PolygonReceiptAdapter(rpc),
-                    trades=SqlAlchemyTradeRepository(session),
-                    markets=SqlAlchemyMarketRepository(session),
-                    token_markets=list(tokens),
+                    trades=SqlAlchemyTradeRepository(self.scoped_session()),
+                    markets=SqlAlchemyMarketRepository(self.scoped_session()),
                     clock=self.clock,
+                    live_tokens=_ScopedLiveTokens(),
                     on_saved=on_saved,
                 )
-                stats = await ingest.run_once()
                 logger.info(
-                    "hook ingest siklus selesai",
-                    extra={"event": "ingest_cycle_done", "trades_saved": stats.trades_saved},
+                    "loop ingest kontinyu dimulai",
+                    extra={"event": "ingest_loop_start"},
                 )
-                await self._session_commit()
+                await ingest.run()
             finally:
+                ws_client.stop()
                 await self.release_session()
 
-        self.ingest_hooks.append(run_ingest_once)
+        self.ingest_hooks.append(run_ingest)
         logger.info(
             "ingest + alert hook dirakit",
             extra={"event": "container_ingest_setup", "version": __version__},

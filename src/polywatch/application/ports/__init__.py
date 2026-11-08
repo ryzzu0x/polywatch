@@ -15,6 +15,7 @@ from polywatch.application.ports.repositories import (
     WatchConfigRepository,
 )
 from polywatch.application.ports.sources import (
+    LiveTokenSource,
     MarketSource,
     PriceSource,
     ReceiptFetcher,
@@ -28,6 +29,7 @@ __all__ = [
     "AlertsSentRepository",
     "Clock",
     "HealthActivityRepository",
+    "LiveTokenSource",
     "MarketRepository",
     "MarketSource",
     "MarketStatsRepository",

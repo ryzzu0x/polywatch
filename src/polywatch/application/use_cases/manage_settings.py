@@ -3,9 +3,15 @@
 MVP single-owner: baris `users` dibuat otomatis dari `telegram_id` lewat port
 `UserRepository`. Validasi input: `Asset` & `Timeframe` divalidasi domain, dan
 aset harus sudah terdaftar di tabel `assets` (dibuat oleh discovery T-007).
-Menonaktifkan asetxtimeframe menyimpan state `enabled=false` yang dipakai
-`list_watch`/`enabled_assets` — siklus ingest berikutnya (T-011) memfilter
-market lewat state ini sehingga yang dinonaktifkan tidak diproses.
+
+Semantik default-enabled (T-026/ADR-012): baris `watch_config` hanya
+menyimpan *override* — pasangan asetxtimeframe tanpa baris dianggap
+enabled, sehingga tabel kosong = semua aset x timeframe aktif dan ingest
+berjalan sejak awal. Menonaktifkan pasangan menyimpan `enabled=false`;
+menghidupkan kembali bisa lewat toggle ON (baris `enabled=true`) atau
+menghapus override. `list_watch`/`enabled_assets` memakai
+`effective_watch_all` sehingga `/markets` menampilkan seluruh kombinasi
+dengan status efektifnya.
 """
 
 from __future__ import annotations
@@ -66,18 +72,23 @@ class ManageSettings:
         return WatchEntry(asset=validated.symbol, timeframe=timeframe, enabled=enabled)
 
     async def list_watch(self, telegram_id: int) -> list[WatchEntry]:
-        """Daftar seluruh konfigurasi watch pengguna (enabled dan tidak)."""
+        """Daftar kombinasi efektif asetxtimeframe (default-enabled, ADR-012).
+
+        Mengembalikan seluruh aset terdaftar x timeframe beserta status
+        efektifnya — pasangan tanpa baris override = enabled. Tabel
+        `watch_config` kosong → semua aktif.
+        """
         user_id = await self.users.get_id_by_telegram(telegram_id)
         if user_id is None:
-            return []
-        return list(await self.watch_config.list_all(user_id))
+            user_id = await self.users.get_or_create_by_telegram(telegram_id)
+        return list(await self.watch_config.effective_watch_all(user_id))
 
     async def enabled_assets(self, telegram_id: int) -> list[WatchEntry]:
-        """Hanya entri aktif — dipakai siklus ingest untuk memfilter market.
+        """Hanya entri aktif — dipakai tampilan/verifikasi filter ingest.
 
-        Inilah mekanisme "menonaktifkan asetxtf menghentikan ingest siklus
-        berikutnya": market dengan asetxtimeframe yang tidak ada di daftar ini
-        dilewati.
+        Dengan semantik default-enabled, tabel kosong menghasilkan semua
+        kombinasi aktif; override `enabled=false` mengeluarkan pasangan
+        itu dari daftar sehingga token market live-nya tidak di-subscribe.
         """
         entries = await self.list_watch(telegram_id)
         return [entry for entry in entries if entry.enabled]

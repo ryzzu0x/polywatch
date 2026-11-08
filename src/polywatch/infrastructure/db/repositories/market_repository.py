@@ -4,15 +4,24 @@ Upsert idempoten: `markets` ON CONFLICT (condition_id) — menjalankan
 discover dua kali tidak menambah baris. Aset baru dari slug dibuat otomatis
 (idempoten via ON CONFLICT (symbol) di tabel `assets`). Status tidak pernah
 mundur: baris existing dengan status lebih maju tetap dipertahankan.
+
+T-026: operasi tulis siklus (`upsert`, `save_result`, `update_status`)
+dibungkus retry terbatas untuk `DeadlockDetectedError` PostgreSQL —
+loop discover dan record_result dapat upsert baris market yang sama
+bersamaan; satu deadlock tidak boleh menggagalkan siklus (rollback
+transaksi lalu ulang statement; backoff kecil antar percobaan).
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, cast
 
 from sqlalchemy import Case, case, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
@@ -34,6 +43,30 @@ from polywatch.infrastructure.db.models import (
     MarketModel,
     MarketResultModel,
 )
+
+logger = logging.getLogger(__name__)
+
+DEADLOCK_MAX_RETRIES = 3
+DEADLOCK_BASE_DELAY_S = 0.2
+#: SQLSTATE PostgreSQL untuk deadlock terdeteksi (40P01).
+_DEADLOCK_SQLSTATE = "40P01"
+
+
+def _is_deadlock(exc: BaseException) -> bool:
+    """Deteksi deadlock PostgreSQL dari exception SQLAlchemy/asyncpg.
+
+    asyncpg melempar `DeadlockDetectedError`; SQLAlchemy membungkusnya
+    sebagai `DBAPIError` dengan `orig` = exception asyncpg dan
+    `orig.sqlstate` = "40P01".
+    """
+    if not isinstance(exc, DBAPIError):
+        return False
+    orig = getattr(exc, "orig", None)
+    sqlstate = getattr(orig, "sqlstate", None)
+    if sqlstate == _DEADLOCK_SQLSTATE:
+        return True
+    return type(orig).__name__ == "DeadlockDetectedError"
+
 
 _STATUS_RANK: dict[MarketStatus, int] = {
     MarketStatus.UPCOMING: 0,
@@ -57,44 +90,94 @@ class SqlAlchemyMarketRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def _execute_with_deadlock_retry(
+        self,
+        op_name: str,
+        execute: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """Jalankan statement dengan retry terbatas saat deadlock PostgreSQL.
+
+        `DeadlockDetectedError` membatalkan SELURUH transaksi session —
+        statement harus diulang setelah rollback. Percobaan maksimum
+        `DEADLOCK_MAX_RETRIES` dengan backoff eksponensial kecil; setiap
+        retry di-log terstruktur (`db_deadlock_retry`); deadlock yang
+        bertahan setelah retry terakhir diteruskan (siklus berikutnya
+        menangani sisa pekerjaan — semua tulisan idempoten).
+        """
+        for attempt in range(1, DEADLOCK_MAX_RETRIES + 1):
+            try:
+                return await execute()
+            except DBAPIError as exc:
+                if not _is_deadlock(exc):
+                    raise
+                if attempt == DEADLOCK_MAX_RETRIES:
+                    logger.error(
+                        "deadlock bertahan setelah retry; diteruskan",
+                        extra={
+                            "event": "db_deadlock_exhausted",
+                            "op": op_name,
+                            "attempts": attempt,
+                        },
+                    )
+                    raise
+                delay = DEADLOCK_BASE_DELAY_S * (2 ** (attempt - 1))
+                logger.warning(
+                    "deadlock terdeteksi; retry",
+                    extra={
+                        "event": "db_deadlock_retry",
+                        "op": op_name,
+                        "attempt": attempt,
+                        "delay_s": delay,
+                    },
+                )
+                await self._session.rollback()
+                await asyncio.sleep(delay)
+        raise AssertionError("unreachable")  # pragma: no cover
+
     async def upsert(self, market: Market) -> int:
         """Upsert satu market; kembalikan id baris (baru maupun lama)."""
-        asset_id = await self._ensure_asset(market.slug.asset.symbol)
 
-        stmt = (
-            pg_insert(MarketModel)
-            .values(
-                condition_id=market.condition_id,
-                slug=_slug_str(market),
-                asset_id=asset_id,
-                timeframe=market.slug.timeframe,
-                start_at=market.slug.start_at,
-                end_at=market.slug.end_at,
-                token_up=market.token_up,
-                token_down=market.token_down,
-                status=market.status.name,
-            )
-            .on_conflict_do_update(
-                index_elements=["condition_id"],
-                set_={
-                    "token_up": market.token_up,
-                    "token_down": market.token_down,
-                    # status tidak mundur: status existing dipakai bila lebih maju.
-                    # Bind param di SET ON CONFLICT tidak melewati konversi tipe
-                    # Enum, jadi wajib dikirim sebagai nama enum (uppercase).
-                    "status": case(
-                        (
-                            _status_rank(MarketModel.status) > _STATUS_RANK[market.status],
-                            MarketModel.status,
+        async def _run() -> int:
+            asset_id = await self._ensure_asset(market.slug.asset.symbol)
+
+            stmt = (
+                pg_insert(MarketModel)
+                .values(
+                    condition_id=market.condition_id,
+                    slug=_slug_str(market),
+                    asset_id=asset_id,
+                    timeframe=market.slug.timeframe,
+                    start_at=market.slug.start_at,
+                    end_at=market.slug.end_at,
+                    token_up=market.token_up,
+                    token_down=market.token_down,
+                    status=market.status.name,
+                )
+                .on_conflict_do_update(
+                    index_elements=["condition_id"],
+                    set_={
+                        "token_up": market.token_up,
+                        "token_down": market.token_down,
+                        # status tidak mundur: status existing dipakai bila lebih maju.
+                        # Bind param di SET ON CONFLICT tidak melewati konversi tipe
+                        # Enum, jadi wajib dikirim sebagai nama enum (uppercase).
+                        "status": case(
+                            (
+                                _status_rank(MarketModel.status) > _STATUS_RANK[market.status],
+                                MarketModel.status,
+                            ),
+                            else_=market.status.name,
                         ),
-                        else_=market.status.name,
-                    ),
-                },
+                    },
+                )
+                .returning(MarketModel.id)
             )
-            .returning(MarketModel.id)
+            result = await self._session.execute(stmt)
+            return int(result.scalar_one())
+
+        return int(
+            await self._execute_with_deadlock_retry(f"upsert_market:{market.condition_id}", _run)
         )
-        result = await self._session.execute(stmt)
-        return int(result.scalar_one())
 
     async def get_by_slug(self, slug: str) -> Market | None:
         stmt = (
@@ -179,25 +262,33 @@ class SqlAlchemyMarketRepository:
 
     async def save_result(self, result: MarketResult) -> None:
         """Simpan market_results idempoten (market_id = PK): ON CONFLICT DO NOTHING."""
-        stmt = (
-            pg_insert(MarketResultModel)
-            .values(
-                market_id=result.market_id,
-                open_price=result.open_price,
-                close_price=result.close_price,
-                result=result.result,
-                volume_usdc=result.volume_usdc,
-                price_source=result.price_source,
-                resolved_at=result.resolved_at,
+
+        async def _run() -> None:
+            stmt = (
+                pg_insert(MarketResultModel)
+                .values(
+                    market_id=result.market_id,
+                    open_price=result.open_price,
+                    close_price=result.close_price,
+                    result=result.result,
+                    volume_usdc=result.volume_usdc,
+                    price_source=result.price_source,
+                    resolved_at=result.resolved_at,
+                )
+                .on_conflict_do_nothing(index_elements=["market_id"])
             )
-            .on_conflict_do_nothing(index_elements=["market_id"])
-        )
-        await self._session.execute(stmt)
+            await self._session.execute(stmt)
+
+        await self._execute_with_deadlock_retry(f"save_result:{result.market_id}", _run)
 
     async def update_status(self, market_id: int, status: MarketStatus) -> None:
         """Perbarui status market (validasi transisi dilakukan use case/domain)."""
-        stmt = update(MarketModel).where(MarketModel.id == market_id).values(status=status.name)
-        await self._session.execute(stmt)
+
+        async def _run() -> None:
+            stmt = update(MarketModel).where(MarketModel.id == market_id).values(status=status.name)
+            await self._session.execute(stmt)
+
+        await self._execute_with_deadlock_retry(f"update_status:{market_id}", _run)
 
     async def has_result(self, market_id: int) -> bool:
         stmt = select(exists().where(MarketResultModel.market_id == market_id))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -21,6 +22,7 @@ from polywatch.domain.market import (
     MarketResult,
     MarketStatus,
     Outcome,
+    Timeframe,
 )
 from polywatch.domain.trade import Action, Trade
 
@@ -325,3 +327,143 @@ async def test_backfill_tanpa_data_api_raise() -> None:
 async def test_backfill_market_tidak_ada() -> None:
     ingest, _, _, _ = _make_ingest([], {}, data_api=FakeDataApi([]))
     assert await ingest.backfill(999) == 0
+
+
+# ------------------------------------------------------- T-026: loop kontinyu
+
+
+class FakeLiveTokens:
+    """LiveTokenSource palsu: daftar berganti antar panggilan."""
+
+    def __init__(self, batches: Sequence[Sequence[TokenMarketInfo]]) -> None:
+        self._batches = list(batches)
+        self.calls = 0
+
+    async def live_tokens(
+        self, timeframes: Sequence[Timeframe] | None = None
+    ) -> Sequence[TokenMarketInfo]:
+        batch = self._batches[min(self.calls, len(self._batches) - 1)]
+        self.calls += 1
+        return batch
+
+
+class RestartableFakeStream:
+    """Stream palsu untuk `run()`: tiap panggilan `stream()` menghasilkan
+    satu event lalu berakhir (mensimulasikan close 1000 tiap jendela)."""
+
+    def __init__(self, events_per_cycle: Sequence[TradeEventSnapshot]) -> None:
+        self._events = list(events_per_cycle)
+        self.stream_calls: list[list[str]] = []
+
+    def stream(self, token_ids: Sequence[str]) -> AsyncIterator[TradeEventSnapshot]:
+        self.stream_calls.append(list(token_ids))
+        return self._gen()
+
+    async def _gen(self) -> AsyncIterator[TradeEventSnapshot]:
+        for event in self._events:
+            yield event
+
+
+async def _sleep_noop(_: float) -> None:
+    return None
+
+
+async def test_run_loop_kontinyu_refresh_token_tiap_siklus() -> None:
+    """T-026: `run()` mempertahankan loop — stream berakhir lalu dilanjutkan
+    dengan token live baru (bukan mati setelah siklus pertama)."""
+    stream = RestartableFakeStream([_event("0xtx1")])
+    fills = {"0xtx1": [_fill("0xtx1", WALLET_A, WALLET_B, side=0, token_id=111)]}
+    repo = FakeTradeRepository()
+    live = FakeLiveTokens([[MARKET], [MARKET], [MARKET]])
+    stop = asyncio.Event()
+
+    ingest = IngestTrades(
+        stream=stream,
+        receipts=FakeReceipts(fills),
+        trades=repo,
+        markets=FakeMarketRepository({7: MARKET}),
+        clock=FakeClock(),
+        live_tokens=live,
+        live_refresh_sec=0.01,
+        sleep=_sleep_noop,
+    )
+
+    async def _stop_after_three_cycles() -> None:
+        for _ in range(500):
+            if len(stream.stream_calls) >= 3:
+                break
+            await asyncio.sleep(0.001)
+        stop.set()
+
+    await asyncio.gather(ingest.run(stop), _stop_after_three_cycles())
+
+    # tiga siklus stream — langganan tidak mati setelah siklus pertama
+    assert len(stream.stream_calls) == 3
+    assert stream.stream_calls[0] == ["111", "222"]
+    # fill maker+taker → 2 trade; siklus 2-3 event sama → dedupe cache
+    # in-memory (idempoten DB juga menjaga bila cache terpotong)
+    assert len(repo.rows) == 2
+    assert live.calls >= 3
+
+
+async def test_run_loop_tanpa_token_tunggu_lalu_lanjut() -> None:
+    """T-026: tanpa token live → tunggu interval, tidak crash."""
+    stream = RestartableFakeStream([])
+    ingest = IngestTrades(
+        stream=stream,
+        receipts=FakeReceipts({}),
+        trades=FakeTradeRepository(),
+        markets=FakeMarketRepository({}),
+        clock=FakeClock(),
+        live_tokens=FakeLiveTokens([[]]),
+        live_refresh_sec=0.01,
+        sleep=_sleep_noop,
+    )
+    stop = asyncio.Event()
+
+    async def _stop_soon() -> None:
+        for _ in range(50):
+            await asyncio.sleep(0)
+        stop.set()
+
+    await asyncio.gather(ingest.run(stop), _stop_soon())
+    assert stream.stream_calls == []  # tidak pernah subscribe tanpa token
+
+
+async def test_run_loop_gagal_query_token_tetap_hidup() -> None:
+    """T-026: live_tokens melempar → pakai daftar sebelumnya, loop jalan."""
+
+    class FailingLiveTokens(FakeLiveTokens):
+        async def live_tokens(
+            self, timeframes: Sequence[Timeframe] | None = None
+        ) -> Sequence[TokenMarketInfo]:
+            self.calls += 1
+            if self.calls == 1:
+                return [MARKET]
+            raise RuntimeError("db down")
+
+    stream = RestartableFakeStream([_event("0xtx1")])
+    ingest = IngestTrades(
+        stream=stream,
+        receipts=FakeReceipts(
+            {"0xtx1": [_fill("0xtx1", WALLET_A, WALLET_B, side=0, token_id=111)]}
+        ),
+        trades=FakeTradeRepository(),
+        markets=FakeMarketRepository({7: MARKET}),
+        clock=FakeClock(),
+        live_tokens=FailingLiveTokens([]),
+        live_refresh_sec=0.01,
+        sleep=_sleep_noop,
+    )
+    stop = asyncio.Event()
+
+    async def _stop_after_two() -> None:
+        for _ in range(500):
+            if len(stream.stream_calls) >= 2:
+                break
+            await asyncio.sleep(0.001)
+        stop.set()
+
+    await asyncio.gather(ingest.run(stop), _stop_after_two())
+    # kegagalan query kedua tidak mematikan loop — siklus tetap lanjut
+    assert len(stream.stream_calls) == 2

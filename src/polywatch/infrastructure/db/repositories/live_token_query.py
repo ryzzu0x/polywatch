@@ -1,9 +1,14 @@
-"""Query token market live untuk ingest T-011.
+"""Query token market live untuk ingest T-011/T-026.
 
-Join `markets` (status LIVE) ↔ `assets` ↔ `watch_config` (enabled):
-hasil hanya market Up/Down live pada pasangan assetxtimeframe yang
-di-watch aktif oleh **semua** pemanggilan watch_config (MVP single-owner:
-`enabled=true` di baris konfigurasi user).
+Semantik watch default-enabled (ADR-012): market LIVE dikembalikan untuk
+**semua** pasangan asetxtimeframe, KECUALI ada baris `watch_config`
+override `enabled=false` (dari salah satu pemilik konfigurasi — MVP
+single-owner) untuk pasangan itu. Tabel `watch_config` kosong berarti
+semua aset x timeframe aktif — "belum ada pengaturan" bukan "semua
+dimatikan".
+
+Join `markets` (status LIVE) ↔ `assets` ↔ LEFT JOIN `watch_config`:
+baris tanpa override = enabled; baris `enabled=false` = dilewati.
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ from polywatch.infrastructure.db.models import (
 
 
 class SqlAlchemyLiveTokenQuery:
-    """Daftar `TokenMarketInfo` market LIVE yang enabled di watch_config."""
+    """Market LIVE aktif dipantau (default-enabled, override menonaktifkan)."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -31,14 +36,26 @@ class SqlAlchemyLiveTokenQuery:
     async def live_tokens(
         self, timeframes: Sequence[Timeframe] | None = None
     ) -> Sequence[TokenMarketInfo]:
-        """Market LIVE + token Up/Down + condition id, urut end_at."""
+        """Market LIVE + token Up/Down + condition id, urut end_at.
+
+        Pasangan asetxtimeframe yang punya baris `watch_config`
+        `enabled=false` (override pemilik) dikecualikan; sisanya —
+        termasuk semua pasangan tanpa baris watch_config — dianggap
+        enabled (ADR-012).
+        """
         stmt = (
             select(MarketModel)
             .join(AssetModel, AssetModel.id == MarketModel.asset_id)
-            .join(WatchConfigModel, WatchConfigModel.asset_id == AssetModel.id)
+            .outerjoin(
+                WatchConfigModel,
+                (WatchConfigModel.asset_id == AssetModel.id)
+                & (WatchConfigModel.timeframe == MarketModel.timeframe),
+            )
             .where(
                 MarketModel.status == MarketStatus.LIVE,
-                WatchConfigModel.enabled.is_(True),
+                # default-enabled: hanya override enabled=false yang
+                # mengecualikan (watch_config NULL = aktif).
+                WatchConfigModel.enabled.is_distinct_from(False),
             )
             .order_by(MarketModel.end_at)
         )

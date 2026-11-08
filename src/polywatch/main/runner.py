@@ -43,9 +43,16 @@ async def _heartbeat_once(container: Container, started_at_monotonic: float) -> 
     )
 
 
-async def _run_ingest_hooks(container: Container, interval_sec: float) -> None:
-    """Jalankan hook ingest (bila ada) tiap interval — tanpa mengubah
-    perilaku runner bila tidak ada hook terpasang."""
+async def _run_ingest_hooks(container: Container) -> None:
+    """Jalankan hook ingest sebagai task kontinyu (T-026).
+
+    Hook ingest sekarang adalah loop kontinyu (langganan WS hidup seumur
+    proses, refresh token tiap siklus) — dipanggil sekali dan dibiarkan
+    berjalan sampai dibatalkan saat shutdown. Exception di dalam hook
+    ditangkap di `IngestTrades.run` (stream restart); error di luar itu
+    di-log dan loop dimulai ulang setelah jeda singkat supaya proses
+    tidak kehilangan ingest hanya karena satu kegagalan.
+    """
     if not container.ingest_hooks:
         return
     while True:
@@ -53,8 +60,11 @@ async def _run_ingest_hooks(container: Container, interval_sec: float) -> None:
             try:
                 await hook()
             except Exception:
-                logger.exception("hook ingest gagal", extra={"event": "ingest_hook_error"})
-        await asyncio.sleep(interval_sec)
+                logger.exception(
+                    "hook ingest gagal; restart setelah jeda",
+                    extra={"event": "ingest_hook_error"},
+                )
+                await asyncio.sleep(5.0)
 
 
 def _start_scheduler(container: Container, stop_event: asyncio.Event) -> list[asyncio.Task[None]]:
@@ -165,8 +175,8 @@ async def run(
                 _heartbeat_loop(container, started_at, heartbeat_interval_sec, stop_event)
             )
         )
-        # (d) hook ingest (no-op bila kosong)
-        tasks.append(asyncio.create_task(_run_ingest_hooks(container, heartbeat_interval_sec)))
+        # (d) hook ingest kontinyu (no-op bila kosong)
+        tasks.append(asyncio.create_task(_run_ingest_hooks(container)))
         # (e) pemeriksaan kesehatan berkala (no-op bila monitor tidak terpasang)
         health_interval = float(getattr(container.settings, "health_check_interval_s", 30.0))
         tasks.append(

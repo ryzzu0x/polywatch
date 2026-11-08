@@ -33,14 +33,18 @@ class FakeUserRepository:
 
 
 class FakeWatchConfigRepository:
-    """WatchConfigRepository in-memory dengan unique key (user, asset, tf)."""
+    """WatchConfigRepository in-memory dengan unique key (user, asset, tf).
+
+    Semantik ADR-012 (default-enabled): kombinasi efektif = semua aset
+    terdaftar x timeframe; baris hanya menyimpan override statusnya.
+    """
 
     def __init__(self, known_assets: set[str]) -> None:
         self.known_assets = known_assets
         self._rows: dict[tuple[int, str, Timeframe], bool] = {}
 
     async def is_enabled(self, user_id: int, asset: str, timeframe: Timeframe) -> bool:
-        return self._rows.get((user_id, asset, timeframe), False)
+        return self._rows.get((user_id, asset, timeframe), True)
 
     async def set_enabled(
         self, user_id: int, asset: str, timeframe: Timeframe, enabled: bool
@@ -52,6 +56,17 @@ class FakeWatchConfigRepository:
             WatchEntry(asset=asset, timeframe=timeframe, enabled=enabled)
             for (uid, asset, timeframe), enabled in sorted(self._rows.items())
             if uid == user_id
+        ]
+
+    async def effective_watch_all(self, user_id: int) -> Sequence[WatchEntry]:
+        return [
+            WatchEntry(
+                asset=asset,
+                timeframe=timeframe,
+                enabled=self._rows.get((user_id, asset, timeframe), True),
+            )
+            for asset in sorted(self.known_assets)
+            for timeframe in Timeframe
         ]
 
     async def asset_exists(self, asset: str) -> bool:
@@ -115,38 +130,50 @@ async def test_aset_rusak_ditolak_domain() -> None:
         await use_case.set_watch_enabled(101, "bt c!", Timeframe.FIVE_MINUTES, True)
 
 
-async def test_list_watch_kosong_untuk_user_baru() -> None:
+async def test_list_watch_kosong_untuk_user_baru_tetap_semua_enabled() -> None:
+    """T-026/ADR-012: tabel watch_config kosong = semua kombinasi enabled."""
     use_case, _, _ = _use_case()
 
-    assert await use_case.list_watch(999) == []
+    entries = await use_case.list_watch(999)
+    # 3 aset x 2 timeframe, semuanya enabled (default-enabled)
+    assert len(entries) == 6
+    assert all(e.enabled for e in entries)
+    assert {e.asset for e in entries} == {"btc", "eth", "sol"}
+    assert {e.timeframe for e in entries} == set(Timeframe)
 
 
-async def test_list_watch_mengembalikan_semua_entri() -> None:
+async def test_list_watch_override_mematikan_satu_kombinasi() -> None:
+    """T-026: override enabled=false hanya mematikan kombinasi itu."""
     use_case, _, _ = _use_case()
 
-    await use_case.set_watch_enabled(101, "btc", Timeframe.FIVE_MINUTES, True)
-    await use_case.set_watch_enabled(101, "eth", Timeframe.FIFTEEN_MINUTES, False)
+    await use_case.set_watch_enabled(101, "btc", Timeframe.FIFTEEN_MINUTES, False)
 
     entries = await use_case.list_watch(101)
-    assert len(entries) == 2
-    assert {e.asset for e in entries} == {"btc", "eth"}
+    by_key = {(e.asset, e.timeframe): e.enabled for e in entries}
+    assert len(entries) == 6
+    assert by_key[("btc", Timeframe.FIFTEEN_MINUTES)] is False
+    assert by_key[("btc", Timeframe.FIVE_MINUTES)] is True
+    assert by_key[("eth", Timeframe.FIFTEEN_MINUTES)] is True
 
 
 async def test_enabled_assets_memfilter_yang_nonaktif() -> None:
-    """Kriteria T-008: nonaktif menyisakan hanya market yang enabled."""
+    """Kriteria T-008 + T-026: nonaktif menyisakan kombinasi lain tetap aktif."""
     use_case, _, _ = _use_case()
 
     await use_case.set_watch_enabled(101, "btc", Timeframe.FIVE_MINUTES, True)
     await use_case.set_watch_enabled(101, "btc", Timeframe.FIFTEEN_MINUTES, True)
     await use_case.set_watch_enabled(101, "eth", Timeframe.FIFTEEN_MINUTES, True)
 
-    # nonaktifkan btcx15m — siklus berikutnya hanya memproses sisanya
+    # nonaktifkan btcx15m — kombinasi lain tetap enabled (default-enabled)
     await use_case.set_watch_enabled(101, "btc", Timeframe.FIFTEEN_MINUTES, False)
 
     enabled = await use_case.enabled_assets(101)
     assert enabled == [
         WatchEntry(asset="btc", timeframe=Timeframe.FIVE_MINUTES, enabled=True),
+        WatchEntry(asset="eth", timeframe=Timeframe.FIVE_MINUTES, enabled=True),
         WatchEntry(asset="eth", timeframe=Timeframe.FIFTEEN_MINUTES, enabled=True),
+        WatchEntry(asset="sol", timeframe=Timeframe.FIVE_MINUTES, enabled=True),
+        WatchEntry(asset="sol", timeframe=Timeframe.FIFTEEN_MINUTES, enabled=True),
     ]
 
     # simulasi filter siklus ingest: market dinonaktifkan tidak ikut
@@ -157,9 +184,11 @@ async def test_enabled_assets_memfilter_yang_nonaktif() -> None:
 
 
 async def test_enabled_assets_kosong_bila_semua_dinonaktifkan() -> None:
-    use_case, _, _ = _use_case()
+    """Override mematikan SEMUA kombinasi → tidak ada yang aktif."""
+    use_case, watch, users = _use_case(known_assets={"sol"})
+    user_id = await users.get_or_create_by_telegram(101)
 
-    await use_case.set_watch_enabled(101, "sol", Timeframe.FIVE_MINUTES, True)
-    await use_case.set_watch_enabled(101, "sol", Timeframe.FIVE_MINUTES, False)
+    for timeframe in Timeframe:
+        await watch.set_enabled(user_id, "sol", timeframe, False)
 
     assert await use_case.enabled_assets(101) == []

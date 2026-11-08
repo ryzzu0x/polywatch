@@ -3,6 +3,9 @@
 Alur (angka latency dari spike T-005c, 39 trade terukur):
 1. `LiveTokenSource` memberi token Up/Down market **LIVE** pada
    assetxtimeframe yang **enabled** di `watch_config` (filter owner).
+   Semantik T-026/ADR-012: baris `watch_config` hanya menyimpan *override*;
+   pasangan tanpa baris dianggap enabled (default-enabled), sehingga tabel
+   kosong = semua aset x timeframe aktif.
 2. Subscribe stream WS (`TradeEventStream`) → event `last_trade_price`
    membawa `tx_hash` (latency event ~81 ms, T-005b).
 3. Per event: dedupe `tx_hash` (cache in-memory) → fetch receipt
@@ -15,12 +18,21 @@ Alur (angka latency dari spike T-005c, 39 trade terukur):
 5. `backfill(market_id, since)`: tutup gap lewat Data API v2
    (`TradeSource`; median trade tersedia 164 s — jalur lambat).
 
+T-026 (langganan WS hidup kontinyu): `run()` adalah loop kontinyu —
+satu langganan WS dipertahankan seumur proses. `LiveTokenSource`
+memberi token market live baru; bila daftar berubah, stream
+direstart dengan token baru (klik WS ditutup server tiap akhir
+jendela 5m/15m dengan close 1000 "all subscribed assets resolved",
+jadi restart koneksi adalah jalur normal, bukan siklus mati).
+
 Hook `on_saved(trades)` dipanggil tiap batch baru — alert engine (T-017)
-akan dihubungkan di sana; sekarang hanya hook, bukan implementasi alert.
+dihubungkan lewat container; evaluator dibuat per-panggilan.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -31,6 +43,7 @@ from polywatch.application.dto.market import TokenMarketInfo
 from polywatch.application.dto.trade import FilledOrderSnapshot
 from polywatch.application.ports import (
     Clock,
+    LiveTokenSource,
     MarketRepository,
     ReceiptFetcher,
     TradeEventStream,
@@ -55,6 +68,9 @@ OnSavedCallback = Callable[[Sequence[Trade]], Awaitable[None]]
 
 DEFAULT_MAX_CACHE_TX = 10_000
 
+#: Interval refresh token market live untuk stream kontinyu (T-026).
+DEFAULT_LIVE_REFRESH_SEC = 30.0
+
 
 @dataclass(slots=True)
 class IngestStats:
@@ -76,30 +92,109 @@ class IngestTrades:
         receipts: ReceiptFetcher,
         trades: TradeRepository,
         markets: MarketRepository,
-        token_markets: Sequence[TokenMarketInfo],
         clock: Clock,
+        live_tokens: LiveTokenSource | None = None,
+        token_markets: Sequence[TokenMarketInfo] | None = None,
         on_saved: OnSavedCallback | None = None,
         data_api: TradeSource | None = None,
         max_cache_tx: int = DEFAULT_MAX_CACHE_TX,
+        live_refresh_sec: float = DEFAULT_LIVE_REFRESH_SEC,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self._stream = stream
         self._receipts = receipts
         self._trades = trades
         self._markets = markets
-        self._token_markets = list(token_markets)
         self._clock = clock
+        self._live_tokens = live_tokens
+        self._token_markets = list(token_markets or [])
         self._on_saved = on_saved
         self._data_api = data_api
         self._max_cache_tx = max_cache_tx
+        self._live_refresh_sec = live_refresh_sec
+        self._sleep = sleep or asyncio.sleep
         self._seen_tx: set[str] = set()
 
-    async def run_once(self) -> IngestStats:
-        """Satu siklus: subscribe token live, proses event sampai stream berakhir.
+    async def run(self, stop_event: asyncio.Event | None = None) -> None:
+        """Loop ingest kontinyu (T-026): langganan WS hidup seumur proses.
 
-        Stream berakhir saat server menutup koneksi (1000 "all subscribed
-        assets resolved" — semua market siklus ini selesai, T-005b/T-005c).
-        Runner memanggil ulang `run_once` (dengan token market live baru)
-        untuk siklus berikutnya.
+        - Refresh token market live dari `live_tokens` tiap
+          `live_refresh_sec` (dan segera saat stream berakhir — market
+          selesai menutup koneksi WS dengan close 1000).
+        - Stream direstart dengan token terbaru; cache dedupe
+          dipertahankan lintas restart (idempoten tetap dijaga DB).
+        - `stop_event` (opsional) mengakhiri loop untuk shutdown rapi.
+        """
+        if stop_event is None:
+            stop_event = asyncio.Event()
+
+        async def _refresh_tokens(
+            previous: list[TokenMarketInfo],
+        ) -> list[TokenMarketInfo]:
+            """Token live terbaru; saat gagal query → pertahankan sebelumnya."""
+            if self._live_tokens is None:
+                return self._token_markets or previous
+            try:
+                return list(await self._live_tokens.live_tokens())
+            except Exception:
+                logger.exception(
+                    "gagal mengambil token live; pakai daftar sebelumnya",
+                    extra={"event": "ingest_live_tokens_error"},
+                )
+                return previous
+
+        current = await _refresh_tokens(list(self._token_markets))
+        while not stop_event.is_set():
+            token_map = _token_map(current)
+            if token_map:
+                logger.info(
+                    "mulai ingest ws",
+                    extra={"tokens": len(token_map), "markets": len(current)},
+                )
+                stats = IngestStats()
+                try:
+                    async for event in self._stream.stream(list(token_map)):
+                        stats.events_seen += 1
+                        if event.tx_hash in self._seen_tx:
+                            stats.tx_deduped += 1
+                            continue
+                        self._seen_tx.add(event.tx_hash)
+                        if len(self._seen_tx) > self._max_cache_tx:
+                            keep = sorted(self._seen_tx)[len(self._seen_tx) // 2 :]
+                            self._seen_tx = set(keep)
+                        received_at = self._clock.now().timestamp()
+                        await self._process_tx(event.tx_hash, token_map, stats, received_at)
+                except Exception:
+                    logger.exception(
+                        "stream ingest gagal; restart dengan token terbaru",
+                        extra={"event": "ingest_stream_error"},
+                    )
+                _log_cycle(stats)
+                if stats.trades_saved > 0:
+                    logger.info(
+                        "batch trade tersimpan",
+                        extra={
+                            "event": "ingest_trades_saved",
+                            "trades_saved": stats.trades_saved,
+                        },
+                    )
+            else:
+                logger.info(
+                    "tidak ada token live; tunggu siklus berikutnya",
+                    extra={"event": "ingest_no_tokens"},
+                )
+            # stream berakhir / tanpa token: tunggu interval (atau stop)
+            # lalu refresh token market live.
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), timeout=self._live_refresh_sec)
+            current = await _refresh_tokens(current)
+
+    async def run_once(self) -> IngestStats:
+        """Satu siklus: proses event dari token saat ini sampai stream berakhir.
+
+        Dipertahankan untuk kompatibilitas test/e2e (T-011): stream fake
+        berakhir setelah semua event — stats siklus dikembalikan. Runner
+        produksi memakai `run()` (kontinyu) sejak T-026.
         """
         token_map = _token_map(self._token_markets)
         stats = IngestStats()

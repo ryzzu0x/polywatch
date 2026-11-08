@@ -7,7 +7,11 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
-from polywatch.application.dto.market import MarketResultSnapshot, MarketSnapshot
+from polywatch.application.dto.market import (
+    MarketResultSnapshot,
+    MarketSnapshot,
+    TokenMarketInfo,
+)
 from polywatch.application.dto.trade import FilledOrderSnapshot, TradeEventSnapshot, TradeSnapshot
 from polywatch.domain.market import Timeframe
 
@@ -40,6 +44,21 @@ class TradeEventStream(Protocol):
 
     def stream(self, token_ids: Sequence[str]) -> AsyncIterator[TradeEventSnapshot]:
         """Yield event `last_trade_price` untuk token yang di-subscribe."""
+        ...
+
+
+class LiveTokenSource(Protocol):
+    """Sumber daftar token market live (T-026: refresh berkala ingest).
+
+    Implementasi nyata (`SqlAlchemyLiveTokenQuery`) mengembalikan market
+    LIVE aktif dipantau dengan semantik watch default-enabled (ADR-012):
+    pasangan tanpa baris override `enabled=false` dianggap aktif.
+    """
+
+    async def live_tokens(
+        self, timeframes: Sequence[Timeframe] | None = None
+    ) -> Sequence[TokenMarketInfo]:
+        """Token Up/Down market live yang aktif dipantau, urut end_at."""
         ...
 
 

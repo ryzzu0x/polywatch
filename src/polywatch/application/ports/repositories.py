@@ -124,6 +124,14 @@ class WatchConfigRepository(Protocol):
 
     async def asset_exists(self, asset: str) -> bool: ...
 
+    async def effective_watch_all(self, user_id: int) -> Sequence[WatchEntry]:
+        """Kombinasi efektif aset terdaftar x timeframe (default-enabled).
+
+        Pasangan tanpa baris override dianggap enabled (ADR-012) —
+        dipakai `/markets` dan filter token live ingest.
+        """
+        ...
+
 
 class AlertSettingsRepository(Protocol):
     async def get(self, user_id: int) -> dict[str, object]: ...
