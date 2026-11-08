@@ -114,19 +114,36 @@ class RecordResult:
     async def execute(self) -> Sequence[RecordResultSummary | RecordResultCycleSummary]:
         """Proses market CLOSED yang belum punya market_results — batch terbatas.
 
-        T-029: maksimum `batch_size` market per siklus (default 10);
-        sisanya ditangani siklus berikutnya. Return list ringkasan per
-        market + satu `RecordResultCycleSummary` di akhir (durasi siklus).
+        T-029: maksimum `batch_size` market per siklus (default 10); sisanya
+        ditangani siklus berikutnya. Setiap market hanya dipoll **sekali**
+        per siklus — market yang resolusinya belum keluar ditunda ke siklus
+        berikutnya (delay resolusi Gamma ±343 s wajar melebihi interval 60 s;
+        menunggu di dalam siklus membuat loop > interval — BUG-011).
+        Notifikasi timeout tetap dievaluasi dari umur market (`end_at` +
+        `timeout_sec` vs now), bukan dari jumlah poll. Return list ringkasan
+        per market + satu `RecordResultCycleSummary` di akhir (durasi siklus).
         """
         import time as _time
 
         started = _time.monotonic()
         pending = await self.repository.list_pending_resolution(limit=self._effective_batch())
         results: list[RecordResultSummary] = []
+        deferred = 0
         for item in pending:
             if await self.repository.has_result(item.market_id):
                 continue  # sudah terarsip: idempoten lintas siklus
-            results.append(await self.execute_once(_pending_to_market(item), item.market_id))
+            market = _pending_to_market(item)
+            slug_str = _slug_str(market)
+            snapshot = await self.source.get_result(slug_str)
+            if snapshot is not None and snapshot.resolved and snapshot.outcome is not None:
+                await self._record(market, item.market_id, snapshot)
+                results.append(RecordResultSummary(item.market_id, slug_str, "resolved"))
+                continue
+            # Belum resolved: tunda ke siklus berikutnya — satu poll per siklus.
+            deferred += 1
+            if self._is_timeout(market):
+                await self._notify_timeout(market, item.market_id)
+                results.append(RecordResultSummary(item.market_id, slug_str, "timeout"))
         cycle = RecordResultCycleSummary(
             processed=len(results),
             resolved=sum(1 for r in results if r.status == "resolved"),
@@ -140,11 +157,19 @@ class RecordResult:
                 "processed": cycle.processed,
                 "resolved": cycle.resolved,
                 "timeout": cycle.timeout,
+                "deferred": deferred,
                 "batch_size": self._effective_batch(),
                 "duration_ms": cycle.duration_ms,
             },
         )
         return [*results, cycle]
+
+    def _is_timeout(self, market: Market) -> bool:
+        """Market melewati batas waktu resolusi (dihitung dari `end_at`)."""
+        if self.clock is None:
+            return False
+        end_at = market.slug.end_at
+        return (self.clock.now() - end_at).total_seconds() > self.timeout_sec
 
     def _effective_batch(self) -> int:
         return max(self.batch_size, 1)

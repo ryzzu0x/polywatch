@@ -245,7 +245,7 @@ class _InstantResultSource:
     async def list_markets(self, timeframe: Timeframe) -> Sequence[MarketSnapshot]:
         return []
 
-    async def get_result(self, slug: str) -> MarketResultSnapshot:
+    async def get_result(self, slug: str) -> MarketResultSnapshot | None:
         self.calls.append(slug)
         return MarketResultSnapshot(
             slug=slug,
@@ -282,6 +282,96 @@ def _make_record(repo: _FakeRepo, *, batch_size: int) -> RecordResult:
         batch_size=batch_size,
         sleep=_no_sleep,
     )
+
+
+class _DelayedResultSource(_InstantResultSource):
+    """Market 1 langsung resolved; market lain belum resolved pada poll ini."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.unresolved = {"btc-updown-5m-1794144000"}
+
+    async def get_result(self, slug: str) -> MarketResultSnapshot | None:
+        if slug in self.unresolved:
+            self.calls.append(slug)
+            self.unresolved.discard(slug)  # resolved pada poll berikutnya
+            return MarketResultSnapshot(
+                slug=slug,
+                open_price=None,
+                close_price=None,
+                volume_usdc=Decimal("1"),
+                resolved=False,
+                outcome=None,
+            )
+        return await super().get_result(slug)
+
+
+async def test_satu_poll_per_siklus_belum_resolved_ditunda() -> None:
+    """T-029: market belum resolved ditunda ke siklus berikutnya — tidak
+    menunggu poll di dalam siklus (penyebab durasi result 128 dtk)."""
+    repo = _FakeRepo()
+    repo.pending = [
+        _pending(1, "btc-updown-5m-1794144000"),
+        _pending(2, "eth-updown-5m-1794144300"),
+    ]
+    source = _DelayedResultSource()
+    record = RecordResult(
+        source=source,
+        repository=repo,
+        primary_price=_InstantPrice(),
+        clock=FakeClock(datetime(2026, 11, 8, 13, 20, tzinfo=UTC)),
+        batch_size=10,
+        sleep=_no_sleep,
+    )
+
+    first = await record.execute()
+    first_market = [s for s in first if isinstance(s, RecordResultSummary)]
+    cycle_first = next(s for s in first if isinstance(s, RecordResultCycleSummary))
+    # btc belum resolved → ditunda (deferred), eth resolved
+    assert [(s.market_id, s.status) for s in first_market] == [(2, "resolved")]
+    assert cycle_first.resolved == 1
+
+    second = await record.execute()  # siklus berikutnya: btc resolved
+    second_market = [s for s in second if isinstance(s, RecordResultSummary)]
+    assert [(s.market_id, s.status) for s in second_market] == [(1, "resolved")]
+    assert source.calls.count("btc-updown-5m-1794144000") == 2  # satu poll per siklus
+
+
+async def test_market_tua_belum_resolved_timeout_notifikasi() -> None:
+    """Market melewati timeout_sec (dari end_at) → status timeout + notifikasi."""
+    repo = _FakeRepo()
+    repo.pending = [
+        _pending(1, "btc-updown-5m-1794144000"),  # end 13:20, now 13:40
+    ]
+
+    class _NeverResolved(_InstantResultSource):
+        async def get_result(self, slug: str) -> MarketResultSnapshot | None:
+            self.calls.append(slug)
+            return MarketResultSnapshot(
+                slug=slug,
+                open_price=None,
+                close_price=None,
+                volume_usdc=Decimal("1"),
+                resolved=False,
+                outcome=None,
+            )
+
+    notifier = _NoopNotifier()
+    record = RecordResult(
+        source=_NeverResolved(),
+        repository=repo,
+        primary_price=_InstantPrice(),
+        notifier=notifier,
+        owner_chat_id=555,
+        clock=FakeClock(datetime(2026, 11, 8, 13, 40, tzinfo=UTC)),
+        timeout_sec=600.0,
+        batch_size=10,
+        sleep=_no_sleep,
+    )
+    summaries = await record.execute()
+    per_market = [s for s in summaries if isinstance(s, RecordResultSummary)]
+    assert [(s.market_id, s.status) for s in per_market] == [(1, "timeout")]
+    assert len(notifier.sent) == 1
 
 
 async def test_batch_size_membatasi_market_per_siklus() -> None:

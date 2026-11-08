@@ -57,6 +57,13 @@ async def session() -> AsyncIterator[AsyncSession]:
     await engine.dispose()
 
 
+class _SystemClock:
+    """Clock sistem nyata untuk uji timeout berbasis umur market."""
+
+    def now(self) -> datetime:
+        return datetime.now(tz=UTC)
+
+
 class _InstantSleep:
     """Sleep instan supaya retry loop tidak menunggu nyata."""
 
@@ -187,8 +194,8 @@ async def test_record_result_idempoten_dua_siklus(session: AsyncSession) -> None
 
 
 @respx.mock
-async def test_record_result_retry_sebelum_resolved(session: AsyncSession) -> None:
-    """Delay resolusi: poll pertama belum resolved, kedua sukses."""
+async def test_record_result_retry_antar_siklus(session: AsyncSession) -> None:
+    """T-029: satu poll per siklus — belum resolved ditunda, siklus kedua sukses."""
     await _seed_closed_market(session)
     pending = _resolved_payload()
     pending["closed"] = True
@@ -202,20 +209,21 @@ async def test_record_result_retry_sebelum_resolved(session: AsyncSession) -> No
         ]
     )
     repo = SqlAlchemyMarketRepository(session)
-    sleep = _InstantSleep()
     use_case = RecordResult(
         source=GammaMarketSource(GAMMA),
         repository=repo,
         primary_price=FakePriceSource("polymarket-chainlink", (Decimal("1"), Decimal("2"))),
-        sleep=sleep,
+        sleep=_InstantSleep(),
     )
 
-    summaries = await use_case.execute()
+    first = await use_case.execute()
+    await session.commit()
+    second = await use_case.execute()  # siklus berikutnya: sudah resolved
     await session.commit()
 
-    assert [s.status for s in summaries if isinstance(s, RecordResultSummary)] == ["resolved"]
-    assert route.call_count == 2
-    assert sleep.calls == 1  # satu jeda retry
+    assert [s.status for s in first if isinstance(s, RecordResultSummary)] == []
+    assert [s.status for s in second if isinstance(s, RecordResultSummary)] == ["resolved"]
+    assert route.call_count == 2  # satu poll per siklus
     assert await _count(session, MarketResultModel) == 1
 
 
@@ -234,8 +242,8 @@ async def test_record_result_timeout_notifikasi_owner(session: AsyncSession) -> 
         notifier=notifier,
         owner_chat_id=555,
         sleep=_InstantSleep(),
-        poll_interval_sec=30.0,
-        timeout_sec=90.0,  # 3 interval
+        clock=_SystemClock(),
+        timeout_sec=90.0,  # umur market (end_at 2026-11-07) jauh > 90 s
     )
 
     summaries = await use_case.execute()
