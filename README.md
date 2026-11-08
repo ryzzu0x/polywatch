@@ -92,9 +92,43 @@ sedikit e2e (market → trade → alert → resolve → skor).
 ```
 src/            kode aplikasi (Clean Architecture)
 tests/          unit, integration, e2e
-scripts/        deploy, backup, restore (dibuat di T-020/T-021)
+scripts/        backup.sh, restore.sh (T-020), deploy (T-021)
 docs/           salinan dokumen planning — sumber kebenaran ada di workspace planning
 .github/        CI
+```
+
+## Backup & restore database (T-020)
+
+Kedua skrip membaca semua nilai dari environment — tidak ada path server
+atau kredensial yang ditulis di dalam skrip.
+
+**Backup** (`scripts/backup.sh`) — `pg_dump` format custom (`-Fc`) ke
+`${BACKUP_DIR}/<slug>-YYYYmmdd-HHMMSS.dump`, rotasi otomatis menyimpan
+14 hari (`RETENTION_DAYS`), dump gagal di tengah jalan meninggalkan file
+parsial dihapus dan exit non-zero:
+
+```bash
+BACKUP_DIR=/path/backup APP_DB_URL="postgresql://user:pass@host:5432/polywatch_db" \
+  ./scripts/backup.sh
+# alternatif tanpa URL: export PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE
+```
+
+**Restore** (`scripts/restore.sh`) — restore dump terbaru (atau
+`RESTORE_FILE`) ke database target. Wajib konfirmasi interaktif (ketik
+`RESTORE`) kecuali `--yes`; menolak restore ke database produksi
+(`PROD_DATABASE`, default `polywatch_db`) tanpa `--force-prod`:
+
+```bash
+BACKUP_DIR=/path/backup APP_DB_URL="postgresql://user:pass@host:5432/polywatch_test" \
+  ./scripts/restore.sh --yes
+```
+
+**Jadwal cron contoh** (backup harian 03:00; path sesuaikan environment,
+jangan hardcode di skrip):
+
+```cron
+0 3 * * * cd /path/ke/app && BACKUP_DIR=/path/backup BACKUP_SLUG=polywatch \
+  APP_DB_URL="$POLYWATCH_DB_URL" ./scripts/backup.sh >> /path/backup/backup.log 2>&1
 ```
 
 ## Deploy
