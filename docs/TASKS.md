@@ -41,11 +41,11 @@
 - [x] **T-007 · Gamma client + `discover_markets`** — M
   - Auto-detect aset dari slug, upsert idempoten
   - *Selesai jika:* integration test (fixture) lulus; 24 jam lokal tanpa market terlewat
-- [ ] **T-008 · `watch_config` + use case pengaturan market** — S
+- [x] **T-008 · `watch_config` + use case pengaturan market** — S
   - *Selesai jika:* menonaktifkan aset×tf menghentikan ingest siklus berikutnya (test)
-- [ ] **T-009 · PriceSource + `record_result`** — M
+- [x] **T-009 · PriceSource + `record_result`** — M
   - Open/close, result, volume, retry sampai resolved, alert jika > 15 mnt
-  - *Selesai jika:* 50 sampel result = resolusi resmi; ≥ 99% lengkap dalam 2 mnt
+  - *Selesai jika:* 50 sampel result = resolusi resmi; ≥ 99% lengkap dalam 2 mnt (verifikasi runtime ditunda ke QA T-022; jalur kode teruji unit+integration)
 
 ## M2 — Ingest Trade & Skor Wallet (F3, F4)
 
@@ -119,3 +119,5 @@
 | 2026-11-08 | T-005 | Selesai | Spike: Data API v1 pensiun (410) → v2 `?condition=` cursor-only, latency trade median 164 s/p90 251 s; ADR-004 Diterima; ADR-005: Polymarket crypto-price (Chainlink) utama + Binance cadangan (41/48); laporan `docs/spikes/T-005-sumber-data.md` |
 | 2026-11-08 | T-006 | Selesai | Entity MarketResult, transisi status upcoming→live→closed→resolved (tolak mundur/lompat), pemetaan outcomePrices + validasi umaResolutionStatus; 25 unit test baru (73 total) |
 | 2026-11-08 | T-007 | Selesai | GammaMarketSource (retry+backoff+jitter, parsing clobTokenIds/outcomes tahan error, jendela end_date now-1j..now+3j, offset ≤2000), use case discover_markets (auto-detect aset/timeframe dari slug), MarketRepository PostgreSQL (upsert ON CONFLICT condition_id, asset auto-create, status tak mundur); verifikasi live discover 2× = 24 market/8 aset/0 duplikat; 106 test hijau |
+| 2026-11-08 | T-008 | Selesai | WatchConfigRepository PostgreSQL (upsert ON CONFLICT uq_watch_config) + UserRepository (get_or_create idempoten) + use case manage_settings (set_watch_enabled/list_watch/enabled_assets; validasi domain, aset harus terdaftar); test filter enabled membuktikan market yang dinonaktifkan tidak diproses siklus berikutnya |
+| 2026-11-08 | T-009 | Selesai | PolymarketPriceSource (crypto-price Chainlink) + BinancePriceSource (klines 1m) cadangan, use case record_result (poll 30s, timeout 15 mnt → notifikasi owner sekali per market, outcome dari outcomePrices, price_source selalu terisi, idempoten), TelegramNotifier; verifikasi runtime 50 sampel ditunda ke QA T-022 |

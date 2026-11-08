@@ -5,6 +5,37 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Added (T-009)
+- `PolymarketPriceSource` (`infrastructure/prices/polymarket_price_source.py`):
+  endpoint crypto-price (Chainlink, ADR-005), httpx async + retry/backoff/jitter
+  + timeout; window market yang sudah lewat >10 menit dilewati tanpa request
+  karena `eventStartTime` historis diabaikan server (T-005).
+- `BinancePriceSource` (`infrastructure/prices/binance_price_source.py`):
+  klines 1m sebagai sumber cadangan; open = open kline pertama window,
+  close = close kline terakhir.
+- Use case `record_result` (`application/use_cases/`): poll resolusi resmi Gamma
+  tiap 30 s sampai `umaResolutionStatus=resolved`; arah hasil hanya dari
+  `outcomePrices` (sumber kebenaran); open/close + `price_source` dari
+  PriceSource (fallback Binance, sentinel `unavailable` bila semua gagal);
+  simpan `market_results` idempoten (ON CONFLICT DO NOTHING) + transisi status
+  CLOSED→RESOLVED via domain; timeout 15 menit → notifikasi owner sekali per
+  market + log error terstruktur.
+- `GammaMarketSource.get_result` kini memetakan `outcomePrices` ke `Outcome`.
+- `MarketRepository` PostgreSQL: `get_result`/`save_result`/`update_status`/
+  `has_result`/`list_pending_resolution`.
+- `TelegramNotifier` (`infrastructure/telegram_notifier.py`): adapter notifikasi
+  aiogram (bukan handler bot — itu T-014); error kirim di-log, tidak menggagalkan
+  use case.
+
+### Added (T-008)
+- `SqlAlchemyWatchConfigRepository` + `SqlAlchemyUserRepository`
+  (`infrastructure/db/repositories/`): upsert idempoten
+  `ON CONFLICT uq_watch_config`, `users` get-or-create per telegram_id.
+- Use case `manage_settings`: `set_watch_enabled`/`list_watch`/`enabled_assets`;
+  validasi `Asset`/`Timeframe` domain; aset harus sudah terdaftar di `assets`;
+  `enabled_assets` adalah filter siklus ingest — menonaktifkan aset×timeframe
+  menghentikan pemrosesan market itu di siklus berikutnya (dibuktikan test).
+
 ### Added (T-007)
 - `GammaMarketSource` (`infrastructure/polymarket/gamma_client.py`): httpx async
   dengan retry + exponential backoff + jitter, timeout eksplisit; polling market
