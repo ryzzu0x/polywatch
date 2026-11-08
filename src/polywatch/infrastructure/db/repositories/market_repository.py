@@ -1,0 +1,147 @@
+"""Implementasi port MarketRepository untuk PostgreSQL (SQLAlchemy 2 async).
+
+Upsert idempoten: `markets` ON CONFLICT (condition_id) — menjalankan
+discover dua kali tidak menambah baris. Aset baru dari slug dibuat otomatis
+(idempoten via ON CONFLICT (symbol) di tabel `assets`). Status tidak pernah
+mundur: baris existing dengan status lebih maju tetap dipertahankan.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any, cast
+
+from sqlalchemy import Case, case, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
+
+from polywatch.domain.errors import InvalidMarketSlugError
+from polywatch.domain.market import Market, MarketSlug, MarketStatus
+from polywatch.infrastructure.db.models import AssetModel, MarketModel
+
+_STATUS_RANK: dict[MarketStatus, int] = {
+    MarketStatus.UPCOMING: 0,
+    MarketStatus.LIVE: 1,
+    MarketStatus.CLOSED: 2,
+    MarketStatus.RESOLVED: 3,
+}
+
+
+def _slug_str(market: Market) -> str:
+    """Rekonstruksi slug dari domain (sumber kebenaran format)."""
+    return (
+        f"{market.slug.asset.symbol}-updown-{market.slug.timeframe.value}"
+        f"-{int(market.slug.start_at.timestamp())}"
+    )
+
+
+class SqlAlchemyMarketRepository:
+    """Repository market dengan session yang dikelola pemanggil."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def upsert(self, market: Market) -> int:
+        """Upsert satu market; kembalikan id baris (baru maupun lama)."""
+        asset_id = await self._ensure_asset(market.slug.asset.symbol)
+
+        stmt = (
+            pg_insert(MarketModel)
+            .values(
+                condition_id=market.condition_id,
+                slug=_slug_str(market),
+                asset_id=asset_id,
+                timeframe=market.slug.timeframe,
+                start_at=market.slug.start_at,
+                end_at=market.slug.end_at,
+                token_up=market.token_up,
+                token_down=market.token_down,
+                status=market.status.name,
+            )
+            .on_conflict_do_update(
+                index_elements=["condition_id"],
+                set_={
+                    "token_up": market.token_up,
+                    "token_down": market.token_down,
+                    # status tidak mundur: status existing dipakai bila lebih maju.
+                    # Bind param di SET ON CONFLICT tidak melewati konversi tipe
+                    # Enum, jadi wajib dikirim sebagai nama enum (uppercase).
+                    "status": case(
+                        (
+                            _status_rank(MarketModel.status) > _STATUS_RANK[market.status],
+                            MarketModel.status,
+                        ),
+                        else_=market.status.name,
+                    ),
+                },
+            )
+            .returning(MarketModel.id)
+        )
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one())
+
+    async def get_by_slug(self, slug: str) -> Market | None:
+        stmt = (
+            select(MarketModel, AssetModel)
+            .join(AssetModel, MarketModel.asset_id == AssetModel.id)
+            .where(MarketModel.slug == slug)
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        row = result.first()
+        if row is None:
+            return None
+        market_row, _ = cast("tuple[MarketModel, AssetModel]", row)
+        return _to_domain(market_row)
+
+    async def list_by_status(self, status: MarketStatus) -> Sequence[Market]:
+        stmt = (
+            select(MarketModel, AssetModel)
+            .join(AssetModel, MarketModel.asset_id == AssetModel.id)
+            .where(MarketModel.status == status)
+            .order_by(MarketModel.start_at)
+        )
+        result = await self._session.execute(stmt)
+        rows = cast("Sequence[tuple[MarketModel, AssetModel]]", result.all())
+        return [_to_domain(m) for m, _ in rows]
+
+    async def _ensure_asset(self, symbol: str) -> int:
+        """Buat asset bila belum ada (idempoten); kembalikan id-nya."""
+        stmt = (
+            pg_insert(AssetModel)
+            .values(symbol=symbol, name=symbol.upper(), enabled_default=True)
+            .on_conflict_do_update(index_elements=["symbol"], set_={"name": symbol.upper()})
+            .returning(AssetModel.id)
+        )
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one())
+
+
+def _status_rank(column: InstrumentedAttribute[MarketStatus]) -> Case[Any]:
+    """Ekspresi SQL rank status (upcoming=0 ... resolved=3) untuk kolom status.
+
+    Perbandingan memakai nama enum (uppercase) karena nilai bind param enum
+    Python dirender asyncpg sebagai `str()` lowercase, bukan `.name`.
+    """
+    return case(
+        (column == MarketStatus.UPCOMING.name, 0),
+        (column == MarketStatus.LIVE.name, 1),
+        (column == MarketStatus.CLOSED.name, 2),
+        (column == MarketStatus.RESOLVED.name, 3),
+        else_=-1,
+    )
+
+
+def _to_domain(market_row: MarketModel) -> Market:
+    try:
+        slug = MarketSlug.parse(market_row.slug)
+    except InvalidMarketSlugError as exc:
+        raise ValueError(f"slug di DB tidak valid: {market_row.slug!r}") from exc
+    return Market(
+        condition_id=market_row.condition_id,
+        slug=slug,
+        token_up=market_row.token_up,
+        token_down=market_row.token_down,
+        status=market_row.status,
+    )
