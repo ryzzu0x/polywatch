@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from polywatch.application.dto.market import PendingMarket, TokenMarketInfo
+from polywatch.application.dto.market import PendingMarket, StaleMarket, TokenMarketInfo
 from polywatch.application.dto.trade import (
     FilledOrderSnapshot,
     ResolvedTrade,
@@ -129,6 +129,9 @@ class FakeMarketRepository:
         return False
 
     async def list_pending_resolution(self, limit: int) -> Sequence[PendingMarket]:
+        return []
+
+    async def list_stale_open(self, now: datetime) -> Sequence[StaleMarket]:
         return []
 
 

@@ -15,6 +15,7 @@ from polywatch.application.dto.market import (
     MarketResultSnapshot,
     MarketSnapshot,
     PendingMarket,
+    StaleMarket,
     TokenMarketInfo,
 )
 from polywatch.application.use_cases.record_result import RecordResult
@@ -77,6 +78,9 @@ class FakeRepository:
         return []
 
     async def list_pending_resolution(self, limit: int) -> Sequence[PendingMarket]:
+        return []
+
+    async def list_stale_open(self, now: datetime) -> Sequence[StaleMarket]:
         return []
 
     async def get_token_market(self, market_id: int) -> TokenMarketInfo | None:

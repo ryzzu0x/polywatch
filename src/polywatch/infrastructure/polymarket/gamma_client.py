@@ -3,7 +3,12 @@
 T-024 — discovery berbasis slug per jendela waktu: pencarian market
 live/upcoming lewat `GET /markets?slug=<slug>` (dipanggil use case
 discover_markets yang menghitung slug-nya). Endpoint list tetap tersedia
-sebagai supplement (T-007) dan hasilnya difilter anti-stale oleh pemanggil.
+untuk pemanggil yang memang menghendaki daftar (mis. tool ops); jalur
+normal discovery TIDAK lagi memakainya (T-028/ADR-010: suplemen
+list-endpoint hanya menghasilkan ribuan payload rusak + request sia-sia).
+
+T-028 — log "payload rusak" diturunkan ke DEBUG dengan rate-limit 60 dtk
+(kebisingan normal, bukan alarm).
 
 Field `clobTokenIds`/`outcomes` berupa string JSON, bukan list — parsing
 wajib tahan error: catat & skip market rusak, jangan crash seluruh batch.
@@ -48,6 +53,57 @@ _SLUG_FETCH_INTERVAL = 0.25
 
 class GammaClientError(RuntimeError):
     """Permintaan Gamma gagal setelah semua retry (transient pun gagal)."""
+
+
+#: Rate limit: log "payload rusak" maksimal sekali per jendela ini (T-028 —
+#: satu siklus list-endpoint dulu menghasilkan ~8.000 WARNING yang membanjiri
+#: journald; sisa kejadian tetap dihitung tapi tidak di-log).
+_PAYLOAD_LOG_INTERVAL_S = 60.0
+
+
+class _BrokenPayloadLogLimiter:
+    """Rate-limit log payload rusak (T-028): 1 log per interval.
+
+    Payload rusak dari Gamma adalah kebisingan normal (market non-Up/Down
+    tercampur di list-endpoint); ribuan WARNING per siklus membanjiri
+    journald tanpa nilai diagnostik tambahan.
+    """
+
+    def __init__(self) -> None:
+        self._last_logged: dict[str, float] = {}
+        self._suppressed: dict[str, int] = {}
+
+    def _now(self) -> float:
+        try:
+            return asyncio.get_running_loop().time()
+        except RuntimeError:  # pragma: no cover - di luar event loop (sync)
+            return time.monotonic()
+
+    def allow(self, key: str) -> bool:
+        """Apakah log untuk `key` (offset/fungsi) boleh keluar sekarang."""
+        now = self._now()
+        last = self._last_logged.get(key)
+        if last is not None and now - last < _PAYLOAD_LOG_INTERVAL_S:
+            self._suppressed[key] = self._suppressed.get(key, 0) + 1
+            return False
+        self._last_logged[key] = now
+        return True
+
+    def suppressed(self, key: str) -> int:
+        """Jumlah kejadian yang di-suppress sejak log terakhir `key`."""
+        return self._suppressed.pop(key, 0)
+
+
+_broken_payload_limiter = _BrokenPayloadLogLimiter()
+
+
+def _log_broken_payload(kind: str, **extra: object) -> None:
+    """Log payload rusak di DEBUG (bukan WARNING) dengan rate-limit 60 dtk."""
+    if _broken_payload_limiter.allow(kind):
+        suppressed = _broken_payload_limiter.suppressed(kind)
+        if suppressed:
+            extra = {**extra, "suppressed_since_last": suppressed}
+        logger.debug("market Gamma di-skip: payload rusak", extra={"kind": kind, **extra})
 
 
 def _parse_json_list(raw: str | None) -> list[str] | None:
@@ -205,10 +261,7 @@ class GammaMarketSource:
             try:
                 return parse_market_payload(payload)
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
-                logger.warning(
-                    "market Gamma di-skip: payload rusak",
-                    extra={"slug": slug, "index": index, "error": str(exc)},
-                )
+                _log_broken_payload("fetch_by_slug", slug=slug, index=index, error=str(exc))
                 return None
         return None
 
@@ -262,8 +315,5 @@ class GammaMarketSource:
             try:
                 parsed.append(parse_market_payload(payload))
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
-                logger.warning(
-                    "market Gamma di-skip: payload rusak",
-                    extra={"offset": offset, "index": index, "error": str(exc)},
-                )
+                _log_broken_payload("list_page", offset=offset, index=index, error=str(exc))
         return parsed

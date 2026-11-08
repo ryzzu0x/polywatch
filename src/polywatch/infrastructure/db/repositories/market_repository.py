@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import datetime
 from typing import Any, cast
 
 from sqlalchemy import Case, case, exists, func, select, update
@@ -28,6 +29,7 @@ from sqlalchemy.orm import InstrumentedAttribute
 from polywatch.application.dto.market import (
     MarketResultEntry,
     PendingMarket,
+    StaleMarket,
     TokenMarketInfo,
 )
 from polywatch.domain.errors import InvalidMarketSlugError
@@ -327,6 +329,40 @@ class SqlAlchemyMarketRepository:
                 condition_id=row.condition_id,
                 slug=row.slug,
                 status=row.status,
+            )
+            for row in rows
+        ]
+
+    async def list_stale_open(self, now: datetime) -> Sequence[StaleMarket]:
+        """Kandidat sweep dua arah (T-028): market UPCOMING/LIVE yang statusnya
+        tidak sesuai jendela waktunya — end_at lewat (→ CLOSED) atau jendela
+        sudah berjalan padahal masih UPCOMING (→ LIVE)."""
+        stmt = (
+            select(MarketModel)
+            .where(
+                # dua arah: (1) waktunya sudah selesai, atau (2) jendelanya
+                # sudah berjalan padahal status masih UPCOMING (discover lambat).
+                (MarketModel.status.in_([MarketStatus.UPCOMING, MarketStatus.LIVE]))
+                & (
+                    (MarketModel.end_at < now)
+                    | (
+                        (MarketModel.status == MarketStatus.UPCOMING)
+                        & (MarketModel.start_at <= now)
+                        & (MarketModel.end_at > now)
+                    )
+                )
+            )
+            .order_by(MarketModel.end_at)
+        )
+        result = await self._session.execute(stmt)
+        rows = result.scalars().all()
+        return [
+            StaleMarket(
+                market_id=row.id,
+                condition_id=row.condition_id,
+                slug=row.slug,
+                status=row.status,
+                end_at=row.end_at,
             )
             for row in rows
         ]

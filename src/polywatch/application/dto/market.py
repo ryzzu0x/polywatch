@@ -52,6 +52,21 @@ class PendingMarket:
 
 
 @dataclass(frozen=True, slots=True)
+class StaleMarket:
+    """Market dengan jendela waktu sudah selesai tapi status masih terbuka.
+
+    Dibuat repository (`list_stale_open`); diproses use case sweep_market_status
+    (T-028) untuk transisi ke CLOSED.
+    """
+
+    market_id: int
+    condition_id: str
+    slug: str
+    status: MarketStatus
+    end_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class MarketResultEntry:
     """Satu baris hasil market untuk tampilan /results (T-015).
 

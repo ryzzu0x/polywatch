@@ -8,7 +8,12 @@ from decimal import Decimal
 
 import pytest
 
-from polywatch.application.dto.market import MarketSnapshot, PendingMarket, TokenMarketInfo
+from polywatch.application.dto.market import (
+    MarketSnapshot,
+    PendingMarket,
+    StaleMarket,
+    TokenMarketInfo,
+)
 from polywatch.application.use_cases.discover_markets import (
     DiscoverMarkets,
     build_slug,
@@ -81,6 +86,9 @@ class FakeRepository:
         return False
 
     async def list_pending_resolution(self, limit: int) -> Sequence[PendingMarket]:
+        return []
+
+    async def list_stale_open(self, now: datetime) -> Sequence[StaleMarket]:
         return []
 
     async def get_token_market(self, market_id: int) -> TokenMarketInfo | None:
@@ -412,3 +420,48 @@ async def test_supplement_menolak_market_basi_dari_list_endpoint() -> None:
     assert "0xstale2" not in repo.by_condition
     assert "0xlive" in repo.by_condition
     assert summary.stale_filtered >= 1
+
+
+# ------------------------------------------------- T-028: supplement default off
+
+
+async def test_supplement_default_mati_tidak_ada_request_list() -> None:
+    """T-028: tanpa supplement_source → list_markets TIDAK pernah dipanggil."""
+    slug = f"btc-updown-5m-{W5}"
+    source = FakeSlugSource({slug: _snapshot(slug, "0xa")})
+
+    class RecordingSupplement:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def list_markets(self, timeframe: Timeframe) -> Sequence[MarketSnapshot]:
+            self.calls += 1
+            return []
+
+    supplement = RecordingSupplement()
+    summary = await DiscoverMarkets(
+        source=source,
+        repository=FakeRepository(),
+        clock=FakeClock(NOW),
+        default_assets=("btc",),
+        timeframes=(Timeframe.FIVE_MINUTES,),
+        sleep=_no_sleep,
+        supplement_source=supplement,  # type: ignore[arg-type]
+    ).execute()
+
+    # jalur slug tetap jalan
+    assert summary.total_markets == 1
+    assert supplement.calls == 1  # hanya karena eksplisit dipasang
+
+    # TANPA parameter → tidak ada pemanggilan list-endpoint sama sekali
+    supplement2 = RecordingSupplement()
+    summary2 = await DiscoverMarkets(
+        source=FakeSlugSource({slug: _snapshot(slug, "0xb")}),
+        repository=FakeRepository(),
+        clock=FakeClock(NOW),
+        default_assets=("btc",),
+        timeframes=(Timeframe.FIVE_MINUTES,),
+        sleep=_no_sleep,
+    ).execute()
+    assert summary2.total_markets == 1
+    assert supplement2.calls == 0  # default: suplemen mati

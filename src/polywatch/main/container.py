@@ -184,6 +184,7 @@ class Container:
         from polywatch.application.use_cases.discover_markets import DiscoverMarkets
         from polywatch.application.use_cases.recompute_scores import RecomputeScores
         from polywatch.application.use_cases.record_result import RecordResult
+        from polywatch.application.use_cases.sweep_market_status import SweepMarketStatus
         from polywatch.infrastructure.db.repositories.market_repository import (
             SqlAlchemyMarketRepository,
         )
@@ -209,7 +210,9 @@ class Container:
                     clock=self.clock,
                     known_assets=SqlAlchemyMarketRepository(self.scoped_session()),
                     default_assets=self.settings.market_assets,
-                    supplement_source=gamma,
+                    # T-028/ADR-010: suplemen list-endpoint TIDAK dipasang —
+                    # sumber kebenaran slug per jendela; suplemen hanya
+                    # menghasilkan ribuan payload rusak + request sia-sia.
                 )
                 summary = await discover.execute()
                 await self._session_commit()
@@ -219,6 +222,14 @@ class Container:
 
         async def run_record_result() -> Sequence[object]:
             try:
+                # T-028: sweep status dulu — market lewat waktu (end_at < now)
+                # yang statusnya masih UPCOMING/LIVE ditutup ke CLOSED supaya
+                # record_result di bawah menemukannya lewat list_pending_resolution.
+                sweep = SweepMarketStatus(
+                    repository=SqlAlchemyMarketRepository(self.scoped_session()),
+                    clock=self.clock,
+                )
+                await sweep.execute()
                 record = RecordResult(
                     source=gamma,
                     repository=SqlAlchemyMarketRepository(self.scoped_session()),
@@ -604,15 +615,16 @@ class Container:
 
             Tidak boleh memakai scoped session task ingest — `release_session`
             akan menutup session yang sedang dipakai repo trade (T-023).
-            Query token live ringan dan read-only; session baru dari factory
-            dipakai sekali lalu ditutup.
+            Query token aktif ringan dan read-only; session baru dari factory
+            dipakai sekali lalu ditutup. T-028 (ADR-015): query berbasis
+            jendela waktu (start_at <= now < end_at), bukan status LIVE.
             """
 
             async def live_tokens(
                 self, timeframes: Sequence[Timeframe] | None = None
             ) -> Sequence[TokenMarketInfo]:
                 async with container.session_factory() as session:
-                    query = SqlAlchemyLiveTokenQuery(session)
+                    query = SqlAlchemyLiveTokenQuery(session, clock=container.clock)
                     wanted = list(timeframes) if timeframes else list(Timeframe)
                     return list(await query.live_tokens(wanted))
 

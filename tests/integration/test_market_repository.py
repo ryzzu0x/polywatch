@@ -308,3 +308,51 @@ async def test_discover_jendela_depan_dan_belakang_diquery(session: AsyncSession
     assert seen[f"btc-updown-5m-{current - 300}"] == "true"
     assert seen[f"btc-updown-5m-{current - 600}"] == "true"
     assert seen[f"btc-updown-5m-{current - 900}"] == "true"
+
+
+# ------------------------------------------------------- T-028: sweep status
+
+
+async def test_list_stale_open_dua_arah(session: AsyncSession) -> None:
+    """T-028: kandidat sweep = basi (end_at < now) + UPCOMING jendela berjalan."""
+
+    from polywatch.domain.market import Market, MarketSlug
+
+    now = datetime.now(tz=UTC)
+    repo = SqlAlchemyMarketRepository(session)
+
+    async def _mk(asset: str, slug: str, status: MarketStatus) -> int:
+        return await repo.upsert(
+            Market(
+                condition_id=f"0x{slug}",
+                slug=MarketSlug.parse(slug),
+                token_up="111",
+                token_down="222",
+                status=status,
+            )
+        )
+
+    # jendela 5m dibulatkan ke bawah supaya slug deterministik
+    def _slug_window(asset: str, windows_ago: int) -> str:
+        ts = int(now.timestamp())
+        ts -= ts % 300
+        return f"{asset}-updown-5m-{ts - windows_ago * 300}"
+
+    live_basi = _slug_window("btc", 3)  # end ~15 mnt lalu
+    upcoming_basi = _slug_window("btc", 7)  # end ~35 mnt lalu
+    upcoming_berjalan = _slug_window("eth", 0)  # jendela berjalan, status telat
+    live_aktif = _slug_window("sol", 0)  # jendela berjalan, status benar
+    await _mk("btc", live_basi, MarketStatus.LIVE)
+    await _mk("btc", upcoming_basi, MarketStatus.UPCOMING)
+    await _mk("eth", upcoming_berjalan, MarketStatus.UPCOMING)
+    await _mk("sol", live_aktif, MarketStatus.LIVE)
+    await session.commit()
+
+    stale = await repo.list_stale_open(now)
+    slugs = {s.slug: s.status for s in stale}
+
+    # basi dua-duanya + UPCOMING yang jendelanya berjalan; LIVE aktif tidak.
+    assert set(slugs) == {live_basi, upcoming_basi, upcoming_berjalan}
+    assert slugs[live_basi] is MarketStatus.LIVE
+    assert slugs[upcoming_basi] is MarketStatus.UPCOMING
+    assert slugs[upcoming_berjalan] is MarketStatus.UPCOMING

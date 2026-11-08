@@ -48,17 +48,19 @@ class TradeEventStream(Protocol):
 
 
 class LiveTokenSource(Protocol):
-    """Sumber daftar token market live (T-026: refresh berkala ingest).
+    """Sumber daftar token market aktif untuk ingest (T-026/T-028 refresh).
 
-    Implementasi nyata (`SqlAlchemyLiveTokenQuery`) mengembalikan market
-    LIVE aktif dipantau dengan semantik watch default-enabled (ADR-012):
-    pasangan tanpa baris override `enabled=false` dianggap aktif.
+    Implementasi nyata (`SqlAlchemyLiveTokenQuery`) memilih market berbasis
+    JENDELA WAKTU (ADR-015): `start_at <= now < end_at` dan status bukan
+    RESOLVED — status `LIVE` bisa basi sehingga tidak lagi dipakai sebagai
+    kriteria. Semantik watch default-enabled (ADR-012) tetap: pasangan
+    tanpa baris override `enabled=false` dianggap aktif.
     """
 
     async def live_tokens(
         self, timeframes: Sequence[Timeframe] | None = None
     ) -> Sequence[TokenMarketInfo]:
-        """Token Up/Down market live yang aktif dipantau, urut end_at."""
+        """Token Up/Down market aktif dalam jendela waktunya, urut end_at."""
         ...
 
 

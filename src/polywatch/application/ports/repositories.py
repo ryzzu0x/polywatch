@@ -9,6 +9,7 @@ from typing import Protocol
 from polywatch.application.dto.market import (
     MarketResultEntry,
     PendingMarket,
+    StaleMarket,
     TokenMarketInfo,
 )
 from polywatch.application.dto.settings import WatchEntry
@@ -39,6 +40,11 @@ class MarketRepository(Protocol):
 
     async def list_pending_resolution(self, limit: int) -> Sequence[PendingMarket]:
         """Market CLOSED tanpa market_results, siap diproses record_result."""
+        ...
+
+    async def list_stale_open(self, now: datetime) -> Sequence[StaleMarket]:
+        """Market UPCOMING/LIVE dengan end_at < now — kandidat sweep ke
+        CLOSED (T-028)."""
         ...
 
 

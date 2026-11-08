@@ -5,8 +5,11 @@ Deterministik: untuk tiap (aset, timeframe) dihitung window start =
 untuk jendela berjalan + 2 ke depan (live/upcoming) dan 3 ke belakang dengan
 `closed=true` (market live hilang dari pencarian slug setelah end — T-005).
 
-Jalur cadangan list-endpoint hanya supplement dan wajib terfilter anti-stale:
-slug harus cocok pola updown DAN `endDate` ±beberapa jam dari sekarang.
+Jalur cadangan list-endpoint (supplement) tidak lagi dipakai di jalur normal
+(T-028/ADR-010): sumber kebenaran adalah slug per jendela; supplement hanya
+opt-in eksplisit (parameter `supplement_source`) dan hasilnya tetap wajib
+terfilter anti-stale: slug harus cocok pola updown DAN `endDate` ±beberapa
+jam dari sekarang.
 Aset & timeframe di-inject (AssetSource + default Settings + Timeframe domain);
 pembentukan slug & validasi jendela ada di domain — adapter hanya eksekusi HTTP.
 """
@@ -77,8 +80,10 @@ class DiscoverMarkets:
     fetch_delay_s: float = 0.25
     #: Sleep antar-request — di-inject test (no-op) untuk jalan instan.
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
-    #: Sumber cadangan list-endpoint (optional) — supplement, hasil wajib
-    #: lolos filter anti-stale (T-024). Biasanya objek MarketSource yang sama.
+    #: Sumber cadangan list-endpoint — OPT-IN, default None (T-028/ADR-010:
+    #: jalur normal tidak memakainya; hanya menghasilkan ribuan payload
+    #: rusak + request sia-sia). Bila diisi, hasilnya wajib lolos filter
+    #: anti-stale.
     supplement_source: MarketSource | None = None
 
     async def execute(self) -> DiscoverySummary:
