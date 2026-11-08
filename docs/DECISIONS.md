@@ -24,7 +24,7 @@
 | ADR-001 | Clean Architecture dengan aturan boundary di lint | Diterima |
 | ADR-002 | Python 3.12 + aiogram + PostgreSQL, monolith satu proses | Diterima |
 | ADR-003 | Skor wallet berbasis edge & ROI, bukan win rate | Diusulkan |
-| ADR-004 | Sumber trade: polling Data API v2 (MVP), hybrid WS+poll di v1 | Diterima (spike T-005 & T-005b, 2026-11-08) |
+| ADR-004 | Sumber trade MVP: hybrid WS CLOB + RPC Polygon (OrderFilled), backfill Data API | Diterima (spike T-005, T-005b, T-005c; T-011 terimplementasi, 2026-11-08) |
 | ADR-005 | Sumber open/close price: Polymarket crypto-price (Chainlink), cadangan Binance | Diterima (spike T-005, 2026-11-08) |
 | ADR-006 | MVP alert saja; wallet & eksekusi di v2 dengan gate paper trading | Diterima |
 | ADR-007 | v2: wallet EVM per pengguna, kunci dienkripsi di server (kustodian) + ekspor oleh pengguna | Diterima |
@@ -55,7 +55,7 @@
 - **Alternatif:** Win rate murni (menyesatkan); PnL absolut (bias ke wallet bermodal besar).
 - **Konsekuensi:** (+) Sinyal lebih jujur. (−) Wallet baru butuh waktu sebelum bisa dinilai; parameter perlu dikalibrasi dengan data nyata di v1.
 
-### ADR-004 — Sumber trade: polling Data API v2 (MVP), hybrid WS+poll di v1
+### ADR-004 — Sumber trade: hybrid WS CLOB + RPC Polygon (OrderFilled) dengan backfill Data API
 - **Tanggal:** 2026-11-08
 - **Status:** Diterima (diverifikasi spike T-005 dan spike T-005b dengan angka nyata; laporan: `docs/spikes/T-005-sumber-data.md`, `docs/spikes/T-005b-websocket.md`)
 - **Konteks:** Perlu trade per wallet dengan delay rendah. Pengecekan awal: Data API `/trades?market=<conditionId>` mengembalikan trade dengan alamat wallet.
@@ -77,6 +77,16 @@
   - Trade WS ↔ Data API cocok satu-satu via `transaction_hash`; wallet hanya tersedia di Data API.
   - Server menutup koneksi (close 1000, `"all subscribed assets resolved"`) saat semua market resolve → **reconnect + re-subscribe wajib** tiap siklus; batas token per koneksi tidak terukur (diuji 4 token).
 - **Konsekuensi tambahan:** WS market channel hanya untuk **harga real-time** (mis. harga sekarang di alert T-017) dan di v1 sebagai *detector* (`transaction_hash`) yang memicu poll Data API untuk mengambil `proxy_wallet` — hybrid WS+poll. Ingest on-chain OrderFilled (backlog v1) tetap satu-satunya jalur satu-hop untuk alert per wallet ≤ 10 s.
+
+- **Temuan tambahan spike T-005c (OrderFilled via RPC Polygon, 2026-11-08; laporan `docs/spikes/T-005c-orderfilled-rpc.md`):**
+  - Seluruh market Up/Down live tereksekusi di **CTF Exchange V2** `0xE111180000d2663C0091e4f400237545B87B996B` (Neg Risk Exchange & exchange V1 tidak muncul di 39 tx yang diamati).
+  - Event kunci: `OrderFilled(bytes32 indexed orderHash, address indexed maker, address indexed taker, uint8 side, uint256 tokenId, uint256 makerAmountFilled, uint256 takerAmountFilled, uint256 fee, bytes32 builder, bytes32 metadata)` — topic0 `0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee`; data 7 word statis, decodable tanpa library ABI.
+  - Memuat **maker/taker wallet** + tokenId + jumlah + arah — semua yang dibutuhkan `Trade`; validasi silang 39/39 tx: tokenId/size/price cocok event WS.
+  - **Latency end-to-end (WS diterima → ter-decode/tersimpan): median 855 ms, p90 1.683 ms, max 2.128 ms** (39 trade, 4 market 5m) — ~190× lebih cepat dari Data API (median 164 s) dan jauh di bawah target ≤ 10 s.
+  - **Event WS datang PRA-KONFIRMASI**: receipt `null` pada 7–9 ms pertama (tx belum masuk blok) → wajib poll receipt (~250 ms) sampai hadir; waktu dominan e2e = menunggu block Polygon (~2 s). `eth_getTransactionReceipt` cukup — tidak perlu `eth_getLogs`.
+  - Latensi RPC per endpoint (15 panggilan): Alchemy 7,5 ms; drpc 15,9 ms; publicnode 186 ms; 1rpc 269 ms. Failover urutan: Alchemy (bila ada) → publicnode → 1rpc → drpc.
+- **Revisi keputusan (T-011, 2026-11-08):** Ingest trade MVP = **hybrid WS + RPC**: WS `last_trade_price` sebagai detector tx (dan harga real-time) → `eth_getTransactionReceipt` (failover) → decode `OrderFilled` → insert idempoten `(tx_hash, log_index, wallet)`. Data API v2 tetap sebagai **backfill** gap (WS putus / market resolve sebelum sempat) — bukan jalur utama. Tidak lagi "polling Data API utama, hybrid di v1".
+- **Konsekuensi revisi:** (+) Alert per wallet ≤ 10 s tercapai di MVP (e2e < 2,2 s terukur); tidak menunggu delay Data API 164 s. (−) Perlu kelola koneksi WS (reconnect tiap siklus market 5m/15m) + failover RPC; ketergantungan kontrak exchange V2 (alamat/event di-hardcode — perlu tabel kontrak bila scope meluas ke market neg-risk).
 
 ### ADR-005 — Sumber open/close price: Polymarket crypto-price (Chainlink selaras), cadangan Binance
 - **Tanggal:** 2026-11-08

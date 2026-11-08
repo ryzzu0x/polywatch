@@ -36,6 +36,9 @@
 - [x] **T-005b · Spike CLOB WebSocket market channel** — M
   - Latency event `price_change`/`last_trade_price`, field identitas trade, ketahanan koneksi
   - *Selesai jika:* pernyataan tegas "cukup/tidak" untuk target ≤ 10 s dan kejelasan apakah WS membawa alamat wallet; ADR-004 diperbarui (`docs/spikes/T-005b-websocket.md`)
+- [x] **T-005c · Spike OrderFilled → wallet via RPC Polygon** — M
+  - WS `last_trade_price` → `transaction_hash` → `eth_getTransactionReceipt` → decode `OrderFilled` CTF Exchange V2 → alamat wallet; ukur latency end-to-end
+  - *Selesai jika:* decode terbukti dengan tx nyata + latency median/p90/max ≥ 20 trade (`docs/spikes/T-005c-orderfilled-rpc.md`)
 
 ## M1 — Discovery Market & Arsip Hasil (F1, F2)
 
@@ -55,9 +58,9 @@
 - [x] **T-010 · Domain Trade & Position** — S
   - `apply_trade` (BUY/SELL, tolak oversell), `positions_from_trades`, `realize` (PnL resolve), `average_entry` berbobot size; error domain `OversellError`
   - *Selesai jika:* unit test posisi bersih (buy/sell parsial, dua sisi) lulus
-- [ ] **T-011 · Data API client + `ingest_trades` idempoten** — M
-  - Cursor per market, backoff, batch insert
-  - *Selesai jika:* 20 market acak cocok ±2% dengan Data API; ingest ulang tanpa duplikat
+- [x] **T-011 · Ingest trades hybrid WS+RPC + backfill Data API** — M
+  - `orderbook_ws` (reconnect, PING/PONG), `polygon_rpc` (failover Alchemy→publicnode→1rpc→drpc, poll receipt pra-konfirmasi), decoder `OrderFilled`, `ingest_trades` (dedupe tx_hash, insert_many idempoten ON CONFLICT, hook `on_saved` untuk alert), `backfill(market_id, since)` Data API
+  - *Selesai jika:* unit+integration test lulus (decoder fixture receipt nyata, failover respx, insert_many idempoten 2×); verifikasi kecocokan 20 market ±2% vs Data API ditunda ke QA T-022
 - [x] **T-012 · Domain scoring (edge, ROI, shrinkage, filter MM)** — M
   - *Selesai jika:* unit test kasus "beli 0.90 menang 85% → edge negatif" & deteksi dua sisi lulus
 - [x] **T-013 · `recompute_scores` setelah resolve** — S
@@ -96,7 +99,7 @@
 ## Backlog (Belum Dijadwalkan)
 
 - [ ] v1: Paper copy-trade + laporan ROI harian/mingguan
-- [ ] v1: Ingest via event on-chain Polygon bila latency polling kurang (OrderFilled memuat wallet; WS market channel T-005b terbukti cepat ~80 ms tetapi TANPA alamat wallet → hanya sebagai detector hybrid WS+poll)
+- [x] (selesai di T-011, dibawa ke MVP) Ingest via event on-chain: WS detector + RPC OrderFilled — e2e median 855 ms
 - [ ] v2: Multi-user (users, pengaturan per pengguna)
 - [ ] v2: Generate wallet EVM otomatis saat `/start` + enkripsi private key
 - [ ] v2: Deposit/withdraw USDC, approval, kredensial CLOB per pengguna
@@ -108,7 +111,7 @@
 
 | ID | Deskripsi | Alasan ditunda | Dicatat |
 |---|---|---|---|
-| TD-001 | Ingest pakai polling Data API, bukan stream on-chain | Lebih cepat dibangun; dievaluasi di v1 | 2026-11-08 |
+| TD-001 | (SELESAI via T-005c/T-011, 2026-11-08) Ingest pakai polling Data API, bukan stream on-chain | Kini hybrid WS+RPC OrderFilled; Data API jadi backfill | 2026-11-08 |
 
 ## Log Progres
 
@@ -129,3 +132,5 @@
 | 2026-11-08 | T-010 | Selesai | Domain agregasi Trade → Position: `apply_trade` (BUY tambah net+cost, SELL kurangi net tanpa ubah cost, tolak oversell via `OversellError`), `positions_from_trades` per (wallet, market_id), `realize` PnL (menang 1/kalah 0), `average_entry` berbobot size (dua sisi → net terbesar); 22 unit test baru (167 total) |
 | 2026-11-08 | T-012 | Selesai | ScoringPolicy injectable (min_sample/shrinkage_k/bobot edge-ROI/ambang), edge_shrunk & roi_shrunk = nilai×n/(n+k), score_wallet 0-100 di-clamp tanpa pembagian nol, aggregate_market+build_wallet_stats (rata-rata entry berbobot USDC, deteksi dua sisi ≥30% market → market maker skor 0); unit test kasus "beli 0.90 menang 85% → skor 0" lulus (24 test domain, 173 total hijau). Technical debt: helper agregasi posisi lokal di domain/scoring.py perlu disatukan dengan T-010 |
 | 2026-11-08 | T-013 | Selesai | Use case recompute_scores (recompute penuh dari seluruh market resolve, bukan inkremental) + WalletStatsRepository PostgreSQL ON CONFLICT (wallet) idempoten + TradeRepository bagian baca (wallets_for_market, resolved_trades_for_wallet via port baru append-only); integration test polywatch_test verifikasi win_rate/edge/roi/score/is_market_maker + idempoten 2× eksekusi hasil sama; insert_many/last_traded_at = scope T-011 |
+| 2026-11-08 | T-005c | Selesai | Spike OrderFilled: seluruh market updown live via CTF Exchange V2 `0xE111180000d2663C0091e4f400237545B87B996B`; event `OrderFilled(bytes32,address,address,uint8,uint256,uint256,uint256,uint256,bytes32,bytes32)` topic0 `0xd543adfd...`; 39/39 trade ter-decode (maker/taker wallet, tokenId, size, usdc, fee, side) dan cocok event WS; e2e WS→tersimpan median 855 ms / p90 1.683 ms / max 2.128 ms (~190× lebih cepat dari Data API 164 s); temuan penting: event WS datang PRA-KONFIRMASI (receipt null sampai tx masuk blok → poll 250 ms); latensi RPC: Alchemy 7,5 ms, drpc 15,9 ms, publicnode 186 ms, 1rpc 269 ms; laporan `docs/spikes/T-005c-orderfilled-rpc.md` |
+| 2026-11-08 | T-011 | Selesai | Ingest hybrid WS+RPC: `orderbook_ws.py` (subscribe market channel, reconnect+backoff otomatis atas close 1000 "all subscribed assets resolved", heartbeat PING), `polygon_rpc.py` (failover Alchemy→publicnode→1rpc→drpc, poll receipt pra-konfirmasi), `order_filled_decoder.py` (decode manual 7 word statis tanpa lib ABI), `ingest_trades.py` (dedupe tx_hash in-memory, mapping token via token_up/token_down, insert_many idempoten ON CONFLICT (tx_hash,log_index,wallet), hook on_saved untuk T-017, backfill Data API), TradeRepository.insert_many+last_traded_at PostgreSQL, LiveTokenQuery (markets LIVE × watch_config enabled); 36 test baru (231 total): decoder fixture receipt nyata, failover respx, dedupe, integration polywatch_test idempoten 2×; gate hijau (ruff/format/mypy strict 80 file/import-linter 3 kept) |

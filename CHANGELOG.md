@@ -5,6 +5,47 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Added (T-005c)
+- Spike `docs/spikes/T-005c-orderfilled-rpc.md` + probe
+  `scripts/spike/t005c_orderfilled_probe.py`: bukti decode `OrderFilled`
+  CTF Exchange V2 (`0xE111180000d2663C0091e4f400237545B87B996B`) dari
+  `eth_getTransactionReceipt` memberi maker/taker wallet + tokenId +
+  jumlah + arah; e2e WS→tersimpan median 855 ms / p90 1.683 ms /
+  max 2.128 ms (39 trade) vs Data API median 164 s.
+
+### Added (T-011)
+- `infrastructure/polymarket/orderbook_ws.py`: klien WS CLOB market
+  channel dengan reconnect otomatis + backoff (close 1000
+  "all subscribed assets resolved" tiap siklus market), heartbeat
+  PING/PONG, parse event `last_trade_price`.
+- `infrastructure/polymarket/polygon_rpc.py`: klien JSON-RPC Polygon
+  async dengan failover endpoint berurutan (Alchemy bila di-set →
+  publicnode → 1rpc → drpc) + poll receipt pra-konfirmasi (event WS
+  datang sebelum tx masuk blok).
+- `infrastructure/polymarket/order_filled_decoder.py`: decode log
+  `OrderFilled` V2 manual (7 word statis) tanpa library ABI.
+- `infrastructure/polymarket/trade_stream.py`: adapter ke port
+  `TradeEventStream`/`ReceiptFetcher`.
+- `application/use_cases/ingest_trades.py`: orkestrasi ingest hybrid —
+  subscribe token market LIVE yang enabled, dedupe tx_hash in-memory,
+  decode fill → `Trade` (mapping token via `token_up`/`token_down`),
+  simpan idempoten, hook `on_saved` untuk alert T-017, `backfill(
+  market_id, since)` lewat Data API.
+- `TradeRepository.insert_many`/`last_traded_at` (PostgreSQL,
+  ON CONFLICT (tx_hash, log_index, wallet) DO NOTHING),
+  `MarketRepository.get_token_market`, `LiveTokenQuery`
+  (markets LIVE × watch_config enabled).
+- Port `TradeEventStream`/`ReceiptFetcher`; DTO `TradeEventSnapshot`/
+  `FilledOrderSnapshot`/`TokenMarketInfo`.
+- Test: decoder (fixture receipt nyata), failover RPC (respx),
+  dedupe & backfill (fake port), integration insert_many idempoten
+  (auto-skip tanpa `TEST_DATABASE_URL`).
+
+### Changed (T-011)
+- ADR-004 direvisi: ingest trade MVP kini hybrid WS+RPC (OrderFilled),
+  Data API menjadi jalur backfill — bukan polling utama.
+
+
 ### Added (T-009)
 - `PolymarketPriceSource` (`infrastructure/prices/polymarket_price_source.py`):
   endpoint crypto-price (Chainlink, ADR-005), httpx async + retry/backoff/jitter
