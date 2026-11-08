@@ -5,6 +5,33 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Fixed — T-025 (siklus scheduler tidak pernah berjalan, `markets` tetap 0)
+- **Bug:** Container menyimpan *fungsi coroutine* (`run_discover` dll)
+  sedangkan scheduler memanggil `.execute()` lewat protocol — setiap siklus
+  gagal `AttributeError` yang ditangkap `_run_cycle` dan hanya di-log
+  (`scheduler_cycle_error`). Discovery, record_result, dan recompute tidak
+  pernah berjalan; tabel `markets` tetap 0 meski bot hidup dan health
+  monitor terus melaporkan komponen basi. Field container bertipe `Any`
+  membuat mypy buta terhadap ketidakcocokan ini.
+- **Perbaikan (ADR-011, kontrak siklus = callable coroutine):**
+  `DiscoverCycle`/`ResultCycle`/`RecomputeCycle` menjadi type alias
+  `Callable[[], Awaitable[...]]` (recompute menerima `market_id`);
+  `discover_loop`/`result_loop`/`_run_cycle` memanggil callable langsung.
+  Field `Container.discover_cycle`/`record_result_cycle`/`recompute_cycle`
+  kini bertipe eksplisit dan `health_monitor: HealthMonitor | None` —
+  mypy strict menangkap mismatch kontrak. Test kontrak baru
+  (`tests/integration/test_scheduler_contract.py`) mengambil siklus dari
+  container nyata (`setup_scheduler`) dan membuktikan loop berjalan tanpa
+  `scheduler_cycle_error` dengan market tersimpan.
+- **Verifikasi runtime nyata** (`timeout 260 uv run python -u -m polywatch.main.cli`,
+  DB lokal): log `discover_markets selesai` (new_markets=18,
+  total_markets=88); `select count(*) from markets` = 104 (23 LIVE,
+  48 RESOLVED; sebelumnya 0); 0 `scheduler_cycle_error`; 17
+  `market_result_saved` + 17 `recompute_scores_done`. Catatan: ditemukan
+  pula deadlock PostgreSQL jarang antar-loop discover vs record_result
+  (upsert baris market sama bersamaan) — diluar scope T-025, siklus
+  berikutnya otomatis sukses; masuk backlog.
+
 ### Fixed — T-024 (discovery market melewatkan market live)
 - **Bug:** `discover_markets` menyimpan 0 market Up/Down live. Bukti:
   `GET /markets?closed=false&order=endDate&ascending=true&end_date_min=<now-1h>`
