@@ -23,7 +23,7 @@ import logging
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -64,6 +64,10 @@ from polywatch.application.use_cases.wallet_views import TopWallets, WalletDetai
 from polywatch.domain.trade import Trade
 from polywatch.infrastructure.clock import SystemClock
 from polywatch.main.config import Settings
+from polywatch.main.scheduler import DiscoverCycle, RecomputeCycle, ResultCycle
+
+if TYPE_CHECKING:
+    from polywatch.application.use_cases.health_monitor import HealthMonitor
 
 logger = logging.getLogger("polywatch.container")
 
@@ -95,10 +99,13 @@ class Container:
     manage_watchlist: ManageWatchlist | None = field(default=None, repr=False)
     manage_alerts: ManageAlerts | None = field(default=None, repr=False)
     ingest_hooks: list[Any] = field(default_factory=list, repr=False)
-    discover_cycle: Any | None = field(default=None, repr=False)
-    record_result_cycle: Any | None = field(default=None, repr=False)
-    recompute_cycle: Any | None = field(default=None, repr=False)
-    health_monitor: Any | None = field(default=None, repr=False)
+    # Kontrak siklus scheduler (ADR-011/T-025): callable coroutine —
+    # scheduler memanggilnya langsung, bukan `.execute()`. Tipe eksplisit
+    # (bukan Any) supaya mypy menangkap ketidakcocokan kontrak.
+    discover_cycle: DiscoverCycle | None = field(default=None, repr=False)
+    record_result_cycle: ResultCycle | None = field(default=None, repr=False)
+    recompute_cycle: RecomputeCycle | None = field(default=None, repr=False)
+    health_monitor: HealthMonitor | None = field(default=None, repr=False)
 
     # ------------------------------------------------------------------ DB session
 
@@ -192,7 +199,7 @@ class Container:
 
         gamma = GammaMarketSource(base_url=self.settings.polymarket_gamma_url)
 
-        async def run_discover() -> Any:
+        async def run_discover() -> object:
             try:
                 discover = DiscoverMarkets(
                     source=gamma,
@@ -208,7 +215,7 @@ class Container:
             finally:
                 await self.release_session()
 
-        async def run_record_result() -> Any:
+        async def run_record_result() -> Sequence[object]:
             try:
                 record = RecordResult(
                     source=gamma,
@@ -223,7 +230,7 @@ class Container:
             finally:
                 await self.release_session()
 
-        async def run_recompute(market_id: int) -> Any:
+        async def run_recompute(market_id: int) -> object:
             try:
                 recompute = RecomputeScores(
                     trades=SqlAlchemyTradeRepository(self.scoped_session()),
@@ -255,7 +262,6 @@ class Container:
         T-023: repository aktivitas dibuat per-cek (session per-task) —
         tidak ada session bersama dengan handler bot.
         """
-        from polywatch.application.use_cases.health_monitor import HealthMonitor
         from polywatch.infrastructure.db.repositories.trade_repository import (
             SqlAlchemyTradeRepository,
         )

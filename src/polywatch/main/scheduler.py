@@ -22,7 +22,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from typing import Any, Protocol
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Protocol
 
 from polywatch import __version__
 from polywatch.application.use_cases.health_monitor import CycleKind
@@ -33,23 +34,13 @@ logger = logging.getLogger("polywatch.scheduler")
 DEFAULT_DISCOVER_INTERVAL_SEC = 30.0
 DEFAULT_RESULT_INTERVAL_SEC = 30.0
 
-
-class DiscoverCycle(Protocol):
-    """Use case discover (adapter protocol — bisa di-inject fake di test)."""
-
-    async def execute(self) -> Any: ...
-
-
-class ResultCycle(Protocol):
-    """Use case record_result; return daftar ringkasan hasil."""
-
-    async def execute(self) -> list[Any]: ...
-
-
-class RecomputeCycle(Protocol):
-    """Use case recompute_scores untuk satu market."""
-
-    async def execute(self, market_id: int) -> Any: ...
+#: Kontrak siklus scheduler (ADR-011/T-025): CALLABLE coroutine, bukan
+#: objek ber-`.execute()`. Container memasang closure yang sudah membungkus
+#: session per-task + commit. Satu kontrak untuk discover/record_result/
+#: recompute (recompute menerima `market_id`) — jangan dicampur objek.
+DiscoverCycle = Callable[[], Awaitable[object]]
+ResultCycle = Callable[[], Awaitable[Sequence[object]]]
+RecomputeCycle = Callable[[int], Awaitable[object]]
 
 
 class HealthReporter(Protocol):
@@ -58,8 +49,10 @@ class HealthReporter(Protocol):
     async def record_cycle(self, kind: CycleKind, ok: bool) -> None: ...
 
 
-def _resolved_ids(summaries: list[Any]) -> list[int]:
+def _resolved_ids(summaries: object) -> list[int]:
     """Ambil market_id resolved dari ringkasan RecordResult (duck-typed)."""
+    if not isinstance(summaries, Sequence):
+        return []
     ids: list[int] = []
     for summary in summaries:
         market_id = getattr(summary, "market_id", None)
@@ -69,7 +62,7 @@ def _resolved_ids(summaries: list[Any]) -> list[int]:
     return ids
 
 
-async def _run_cycle(name: str, cycle: Any) -> tuple[bool, Any]:
+async def _run_cycle(name: str, cycle: Callable[[], Awaitable[object]]) -> tuple[bool, object]:
     """Jalankan satu siklus; return (sukses, hasil). Exception di-log, tidak diteruskan."""
     try:
         return True, await cycle()
@@ -108,7 +101,7 @@ async def discover_loop(
 ) -> None:
     """Loop discover market: jalan segera lalu tiap interval."""
     while not stop_event.is_set():
-        ok, _ = await _run_cycle("discover", discover.execute)
+        ok, _ = await _run_cycle("discover", discover)
         await _report(monitor, "discover", ok)
         await _wait(stop_event, interval_sec)
     logger.info(
@@ -125,10 +118,14 @@ async def result_loop(
 ) -> None:
     """Loop result: resolve market CLOSED baru, lalu recompute market itu."""
     while not stop_event.is_set():
-        ok, summaries = await _run_cycle("record_result", record_result.execute)
+        ok, summaries = await _run_cycle("record_result", record_result)
         await _report(monitor, "result", ok)
-        for market_id in _resolved_ids(summaries or []):
-            await _run_cycle("recompute_scores", lambda mid=market_id: recompute.execute(mid))
+        for market_id in _resolved_ids(summaries):
+
+            async def _recompute_once(mid: int = market_id) -> object:
+                return await recompute(mid)
+
+            await _run_cycle("recompute_scores", _recompute_once)
         await _wait(stop_event, interval_sec)
     logger.info("loop result berhenti", extra={"event": "scheduler_loop_stop", "cycle": "result"})
 

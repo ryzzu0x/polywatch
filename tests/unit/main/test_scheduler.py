@@ -1,15 +1,21 @@
 """Unit test scheduler siklus penuh (T-018 wiring) — interval milidetik.
 
-Membuktikan: (a) tiap use case dipanggil oleh loop masing-masing, (b)
+Kontrak siklus (ADR-011/T-025): **callable coroutine**, bukan objek
+ber-`.execute()`. Test di sini memakai fake berupa fungsi biasa;
+test kontrak lewat container nyata ada di
+`tests/integration/test_scheduler_contract.py`.
+
+Membuktikan: (a) tiap siklus dipanggil oleh loop masing-masing, (b)
 exception satu siklus dilaporkan tanpa menghentikan loop, (c) shutdown
 membatalkan semua task rapi, (d) result baru (resolved) memicu
-recompute_scores untuk market itu.
+recompute untuk market itu.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import pytest
@@ -38,48 +44,42 @@ class FakeMonitor:
         self.reports.append((kind, ok))
 
 
-class FakeDiscover:
-    def __init__(self, raise_times: set[int] | None = None) -> None:
-        self.calls = 0
-        self._raise_times = raise_times or set()
-
-    async def execute(self) -> object:
-        self.calls += 1
-        if self.calls in self._raise_times:
-            raise RuntimeError("discover boom")
-        return object()
-
-
 @dataclass(frozen=True, slots=True)
 class FakeResultSummary:
     market_id: int
     status: str
 
 
-class FakeRecordResult:
-    """`None` di `summaries_per_cycle` berarti siklus itu raise."""
+class _FakeCycles:
+    """Pabrik callable siklus palsu (kontrak T-025: callable, bukan objek)."""
 
     def __init__(
-        self, summaries_per_cycle: list[list[FakeResultSummary] | None] | None = None
+        self,
+        discover_raises: set[int] | None = None,
+        result_cycles: list[Sequence[FakeResultSummary] | None] | None = None,
     ) -> None:
-        self.calls = 0
-        self._per_cycle = summaries_per_cycle or []
+        self.discover_calls = 0
+        self.result_calls = 0
+        self.recompute_ids: list[int] = []
+        self._discover_raises = discover_raises or set()
+        self._result_cycles = result_cycles or []
 
-    async def execute(self) -> list[FakeResultSummary]:
-        index = self.calls
-        self.calls += 1
-        cycle = self._per_cycle[index] if index < len(self._per_cycle) else []
+    async def discover(self) -> object:
+        self.discover_calls += 1
+        if self.discover_calls in self._discover_raises:
+            raise RuntimeError("discover boom")
+        return object()
+
+    async def record_result(self) -> list[FakeResultSummary]:
+        index = self.result_calls
+        self.result_calls += 1
+        cycle = self._result_cycles[index] if index < len(self._result_cycles) else []
         if cycle is None:
             raise RuntimeError("record boom")
-        return cycle
+        return list(cycle)
 
-
-class FakeRecompute:
-    def __init__(self) -> None:
-        self.market_ids: list[int] = []
-
-    async def execute(self, market_id: int) -> object:
-        self.market_ids.append(market_id)
+    async def recompute(self, market_id: int) -> object:
+        self.recompute_ids.append(market_id)
         return object()
 
 
@@ -93,15 +93,15 @@ def _settings(discover_s: float, result_s: float) -> Settings:
 
 
 async def _run_for(
-    discover: FakeDiscover,
-    record_result: FakeRecordResult,
-    recompute: FakeRecompute,
+    fake: _FakeCycles,
     duration_s: float,
     settings: Settings,
 ) -> list[asyncio.Task[None]]:
     """Jalankan scheduler sejenak lalu stop rapi; return task-nya (sudah selesai)."""
     stop = asyncio.Event()
-    tasks = create_scheduler_tasks(discover, record_result, recompute, settings, stop)
+    tasks = create_scheduler_tasks(
+        fake.discover, fake.record_result, fake.recompute, settings, stop
+    )
     await asyncio.sleep(duration_s)
     stop.set()
     await cancel_all(tasks)
@@ -114,26 +114,25 @@ async def test_interval_dari_settings() -> None:
 
 
 async def test_setiap_use_case_dipanggil() -> None:
-    discover = FakeDiscover()
-    record = FakeRecordResult(summaries_per_cycle=[[FakeResultSummary(3, "resolved")]])
-    recompute = FakeRecompute()
-    await _run_for(discover, record, recompute, duration_s=0.15, settings=_settings(0.05, 0.05))
-    assert discover.calls >= 2
-    assert record.calls >= 2
-    assert 3 in recompute.market_ids  # market resolved direcompute
+    fake = _FakeCycles(result_cycles=[[FakeResultSummary(3, "resolved")]])
+    await _run_for(fake, duration_s=0.15, settings=_settings(0.05, 0.05))
+    assert fake.discover_calls >= 2
+    assert fake.result_calls >= 2
+    assert 3 in fake.recompute_ids  # market resolved direcompute
 
 
 async def test_exception_tidak_menghentikan_loop(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    discover = FakeDiscover(raise_times={1, 2})  # dua siklus pertama gagal
-    record = FakeRecordResult(summaries_per_cycle=[None, None])  # dua siklus gagal
-    recompute = FakeRecompute()
+    fake = _FakeCycles(
+        discover_raises={1, 2},
+        result_cycles=[None, None],  # dua siklus pertama gagal
+    )
     with caplog.at_level(logging.ERROR, logger="polywatch.scheduler"):
-        await _run_for(discover, record, recompute, duration_s=0.2, settings=_settings(0.03, 0.03))
+        await _run_for(fake, duration_s=0.2, settings=_settings(0.03, 0.03))
     # Loop tetap hidup melewati siklus gagal.
-    assert discover.calls > 2
-    assert record.calls > 2
+    assert fake.discover_calls > 2
+    assert fake.result_calls > 2
     # Error tercatat terstruktur.
     errors = [r for r in caplog.records if r.getMessage() == "siklus scheduler gagal"]
     assert len(errors) >= 4
@@ -143,11 +142,11 @@ async def test_exception_tidak_menghentikan_loop(
 
 
 async def test_shutdown_membatalkan_semua_task() -> None:
-    discover = FakeDiscover()
-    record = FakeRecordResult()
-    recompute = FakeRecompute()
+    fake = _FakeCycles()
     stop = asyncio.Event()
-    tasks = create_scheduler_tasks(discover, record, recompute, _settings(0.05, 0.05), stop)
+    tasks = create_scheduler_tasks(
+        fake.discover, fake.record_result, fake.recompute, _settings(0.05, 0.05), stop
+    )
     names = {t.get_name() for t in tasks}
     assert names == {"scheduler-discover", "scheduler-result"}
     stop.set()
@@ -159,22 +158,23 @@ async def test_shutdown_membatalkan_semua_task() -> None:
 
 
 async def test_market_timeout_tidak_direcompute() -> None:
-    discover = FakeDiscover()
-    record = FakeRecordResult(summaries_per_cycle=[[FakeResultSummary(9, "timeout")]])
-    recompute = FakeRecompute()
-    await _run_for(discover, record, recompute, duration_s=0.1, settings=_settings(0.03, 0.03))
-    assert 9 not in recompute.market_ids
+    fake = _FakeCycles(result_cycles=[[FakeResultSummary(9, "timeout")]])
+    await _run_for(fake, duration_s=0.1, settings=_settings(0.03, 0.03))
+    assert 9 not in fake.recompute_ids
 
 
 async def test_siklus_dilaporkan_ke_health_monitor() -> None:
     """T-019: tiap siklus (sukses & gagal) dilaporkan ke monitor."""
-    discover = FakeDiscover(raise_times={1})  # siklus kedua gagal
-    record = FakeRecordResult()
-    recompute = FakeRecompute()
+    fake = _FakeCycles(discover_raises={1})  # siklus kedua gagal
     monitor = FakeMonitor()
     stop = asyncio.Event()
     tasks = create_scheduler_tasks(
-        discover, record, recompute, _settings(0.03, 0.03), stop, monitor=monitor
+        fake.discover,
+        fake.record_result,
+        fake.recompute,
+        _settings(0.03, 0.03),
+        stop,
+        monitor=monitor,
     )
     await asyncio.sleep(0.15)
     stop.set()
@@ -192,9 +192,7 @@ async def test_siklus_dilaporkan_ke_health_monitor() -> None:
 
 async def test_loop_tanpa_monitor_tetap_jalan() -> None:
     """Monitor tidak terpasang (None) tidak mengganggu loop."""
-    discover = FakeDiscover()
-    record = FakeRecordResult()
-    recompute = FakeRecompute()
-    await _run_for(discover, record, recompute, duration_s=0.1, settings=_settings(0.03, 0.03))
-    assert discover.calls >= 2
-    assert record.calls >= 2
+    fake = _FakeCycles()
+    await _run_for(fake, duration_s=0.1, settings=_settings(0.03, 0.03))
+    assert fake.discover_calls >= 2
+    assert fake.result_calls >= 2

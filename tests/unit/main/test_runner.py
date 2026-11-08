@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from polywatch.application.use_cases.health_monitor import HealthMonitor
 from polywatch.main.config import Settings
 from polywatch.main.container import Container
 from polywatch.main.runner import run
@@ -34,10 +35,13 @@ class FakeClock:
         return self._now
 
 
-class FakeHealthMonitor:
-    """Monitor kesehatan palsu — mencatat setiap check()."""
+class FakeHealthMonitor(HealthMonitor):
+    """Monitor kesehatan palsu — subclass nyata supaya bertipe kompatibel
+    dengan field container (T-025: `health_monitor` tidak lagi `Any`).
+    """
 
     def __init__(self, fail: bool = False) -> None:
+        super().__init__(activity=_NoopActivity(), notifier=_NoopNotifier(), clock=FakeClock())
         self.checks = 0
         self._fail = fail
 
@@ -48,6 +52,20 @@ class FakeHealthMonitor:
         return None
 
     async def record_cycle(self, kind: str, ok: bool) -> None:  # pragma: no cover
+        return None
+
+
+class _NoopActivity:
+    """Repository aktivitas no-op untuk monitor palsu."""
+
+    async def last_trade_at_live(self) -> datetime | None:
+        return None
+
+
+class _NoopNotifier:
+    """Notifier no-op untuk monitor palsu."""
+
+    async def send(self, text: str, chat_id: int | None = None) -> None:
         return None
 
 
