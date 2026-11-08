@@ -5,6 +5,47 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Fixed — T-026 (ingest trade tidak pernah berjalan, `trades` tetap 0)
+- **Bug 1 (semantik watch):** `SqlAlchemyLiveTokenQuery` INNER JOIN
+  `watch_config enabled=true`, sedangkan tabel `watch_config` kosong
+  (0 baris) → 0 token live → setiap siklus log `tidak ada token live;
+  siklus dilewati` dan `trades` tetap 0 meski DB punya 104 market
+  (23 LIVE). "Belum ada pengaturan" salah diperlakukan sebagai "semua
+  dimatikan". **Perbaikan (ADR-012):** baris `watch_config` hanya
+  menyimpan *override* — pasangan asetxtimeframe tanpa baris dianggap
+  enabled. LiveTokenQuery memakai LEFT JOIN + `IS DISTINCT FROM FALSE`;
+  `is_enabled` default True; method baru `effective_watch_all` dipakai
+  `ManageSettings.list_watch`/`enabled_assets` sehingga `/markets`
+  menampilkan seluruh kombinasi dengan status efektif. Tanpa migrasi.
+- **Bug 2 (ingest putus tiap siklus + tidak pernah commit):** ingest
+  dipolling per-siklus dengan commit hanya di akhir siklus — stream WS
+  kontinyu tidak pernah "berakhir", jadi trade tidak pernah ter-commit;
+  query token live juga memakai scoped session task ingest yang ditutup
+  `release_session` di tengah siklus. **Perbaikan (ADR-013):**
+  `IngestTrades.run()` adalah loop kontinyu seumur proses (langganan WS
+  hidup, refresh token tiap 30 dtk lewat port `LiveTokenSource` dengan
+  session sekali-pakai, stream restart dengan token terbaru saat server
+  menutup koneksi, close 1000 per jendela), plus **commit per batch**
+  (`on_batch_commit`). Runner menjalankan hook ingest sebagai task
+  tunggal. Bonus: `setup_health` NameError (HealthMonitor hanya
+  TYPE_CHECKING import, sisa T-025) diperbaiki dengan import lokal.
+- **Bug 3 (deadlock PostgreSQL):** `DeadlockDetectedError` antar-loop
+  discover vs record_result saat upsert baris market sama. **Perbaikan:**
+  `_execute_with_deadlock_retry` pada upsert/`save_result`/
+  `update_status` MarketRepository — 3 percobaan, backoff 0.2s×2^n,
+  rollback tiap retry, log terstruktur `db_deadlock_retry`/
+  `db_deadlock_exhausted`; deteksi via SQLSTATE 40P01.
+- **Verifikasi runtime nyata** (`timeout 240 uv run python -u -m
+  polywatch.main.cli`, DB lokal): log `mulai ingest ws` tokens=44 (> 0);
+  `select count(*) from trades` = 3162 (> 0; run debug 110 dtk menangkap
+  3159 trade dari 451 event); contoh trade tersimpan lengkap
+  (wallet/outcome/price/size/usdc/market/tx); deadlock retry terbukti
+  bekerja di log run nyata (`db_deadlock_retry` attempt 1 → siklus
+  lanjut). alerts_sent masih 0 — wajar di awal: `wallet_stats` baru
+  terisi setelah market resolve dan recompute_scores jalan.
+- Test: 342 → 356 (default-enabled + override unit/integration, loop
+  kontinyu, commit per batch, retry deadlock).
+
 ### Fixed — T-025 (siklus scheduler tidak pernah berjalan, `markets` tetap 0)
 - **Bug:** Container menyimpan *fungsi coroutine* (`run_discover` dll)
   sedangkan scheduler memanggil `.execute()` lewat protocol — setiap siklus

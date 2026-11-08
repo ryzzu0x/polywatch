@@ -137,9 +137,13 @@ Error ditampilkan ke pengguna sebagai pesan singkat; detail (kode + trace id) ma
    guard anti-stale: slug cocok pola updown DAN endDate ±6 jam → selain itu skipped_stale
    list-endpoint hanya supplement, wajib lolos filter anti-stale yang sama
 
-[Worker tiap 2–3 dtk per market live] ingest_trades
-   Data API /trades?market=<condition_id> (cursor waktu) → insert idempoten trades
-   → update positions → evaluate_alert(trade)
+[Task kontinyu, refresh token tiap 30 dtk] ingest_trades (T-026/ADR-013: loop kontinyu)
+   token market live = LiveTokenQuery (status LIVE; semantik watch default-enabled
+   ADR-012: watch_config hanya menyimpan override, tabel kosong = semua aktif)
+   → satu langganan WS CLOB market channel hidup seumur proses (reconnect saat
+   server menutup koneksi close 1000 per akhir jendela 5m/15m, re-subscribe
+   dengan token terbaru) → event `last_trade_price` (tx_hash) → fetch receipt
+   RPC (OrderFilled) → trades (idempoten, commit per batch) → evaluate_alert
         skor wallet ≥ ambang atau di watchlist, size ≥ minimal, bukan cooldown
         → ambil harga sekarang (CLOB) → Notifier.send(alert) → catat alerts_sent(delay_ms)
 
@@ -160,6 +164,7 @@ Kegagalan API: retry dengan exponential backoff + jitter; error berulang dikirim
 - **Polymarket Gamma API** (`gamma-api.polymarket.com`) — discovery utama T-024: `GET /markets?slug=<slug>&closed=<bool>` per jendela waktu (berjalan+2 depan `closed=false`, 3 belakang `closed=true`; throttle ≤5 req/s); endpoint list (`order=endDate` + `end_date_min/max`) hanya supplement dengan filter anti-stale, field kunci `conditionId`, `clobTokenIds` (string JSON), `slug` (pola `{aset}-updown-{5m|15m}-{unix_start}` terverifikasi), `outcomePrices`/`outcomes`, `umaResolutionStatus`, `volume` (terisi setelah resolve). Hasil resolusi: query `closed=true` (delay resolve setelah end ±6 menit; market live menghilang dari pencarian slug tanpa `closed=true`).
 - **Polymarket Data API v2** (`data-api.polymarket.com/v2`) — trade per market: `GET /v2/trades?condition=<conditionId>&limit=500`, pagination **cursor-only** (`next_cursor`), field `proxy_wallet`, `side`, `token_id`, `condition_id`, `size`, `price`, `timestamp`, `outcome`, `outcome_index`, `transaction_hash`. Catatan: v1 sudah pensiun (410); latency trade→tersedia median ±164 s. Insert wajib idempoten (duplikat umum saat polling).
 - **Polymarket CLOB API** — harga/orderbook saat ini (MVP); order (v2).
+- **Polymarket CLOB WS market channel** (`wss://ws-subscriptions-clob.polymarket.com/ws/market`) — stream trade real-time untuk ingest (T-011/T-026): subscribe `{"assets_ids": [...], "type": "market"}`; event `last_trade_price` membawa `transaction_hash` (wallet diambil via RPC receipt); server menutup koneksi close 1000 "all subscribed assets resolved" tiap akhir jendela 5m/15m — klien reconnect + re-subscribe token terbaru; heartbeat text-frame `PING`/`PONG`; event `price_change` sangat deras (±200/s per 2 market ramai) dan diabaikan.
 - **Sumber harga open/close (ADR-005)** — utama: `GET polymarket.com/api/crypto/crypto-price?symbol=<aset>&eventStartTime=<unix>` (`openPrice`/`closePrice` feed Chainlink selaras resolusi; hanya window aktif — tidak bisa backfill). Cadangan: Binance klines 1m (`api.binance.com/api/v3/klines`). Kolom `price_source` selalu disimpan.
 - **Telegram Bot API** — via aiogram.
 - **v2:** Polygon RPC (saldo, approval USDC), CLOB authenticated (L1/L2 key diturunkan dari wallet pengguna).
