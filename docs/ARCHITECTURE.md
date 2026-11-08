@@ -179,9 +179,9 @@ Polymarket APIs ⇄ [VPS: polywatch.service (python, venv)] ⇄ PostgreSQL 16 (l
                             Telegram Bot API (long polling, tanpa port publik)
 ```
 
-- Lokasi di VPS: `/home/ubuntu/project/polywatch/` (runtime saja)
+- Lokasi runtime di VPS: direktori project (`<PROJECT_DIR>/polywatch/`), runtime saja. Path host aktual tidak disimpan di repo — lihat catatan akses lokal.
 - Alur deploy satu arah: lokal → commit → push GitHub → `git pull` di VPS → `uv sync` → `alembic upgrade head` → restart `polywatch.service`. Tidak ada edit kode langsung di VPS.
-- Backup: `pg_dump` harian ke `/home/ubuntu/backups/polywatch/`, retensi 14 hari.
+- Backup: `pg_dump` harian ke direktori backup di server (`<BACKUP_DIR>/polywatch/`, diatur lewat env deploy), retensi 14 hari.
 - Rollback: `git checkout <tag sebelumnya>` + restore dump bila migrasi gagal; restart service.
 
 ## 11. Strategi Test
