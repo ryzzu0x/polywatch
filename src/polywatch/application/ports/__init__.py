@@ -4,6 +4,7 @@ from polywatch.application.ports.clock import Clock
 from polywatch.application.ports.notifier import Notifier
 from polywatch.application.ports.repositories import (
     AlertSettingsRepository,
+    AlertsSentRepository,
     MarketRepository,
     MarketStatsRepository,
     TradeRepository,
@@ -23,6 +24,7 @@ from polywatch.application.ports.watchlist import WatchlistRepository
 
 __all__ = [
     "AlertSettingsRepository",
+    "AlertsSentRepository",
     "Clock",
     "MarketRepository",
     "MarketSource",

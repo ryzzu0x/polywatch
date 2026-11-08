@@ -117,3 +117,20 @@ class AlertSettingsRepository(Protocol):
     async def get(self, user_id: int) -> dict[str, object]: ...
 
     async def save(self, user_id: int, values: dict[str, object]) -> None: ...
+
+
+class AlertsSentRepository(Protocol):
+    """Riwayat alert terkirim (cooldown + audit delay_ms), T-017."""
+
+    async def record(
+        self,
+        user_id: int,
+        wallet: str,
+        market_id: int,
+        tx_hash: str,
+        log_index: int,
+        sent_at: datetime,
+        delay_ms: int,
+    ) -> None: ...
+
+    async def last_sent_at(self, user_id: int, wallet: str) -> datetime | None: ...

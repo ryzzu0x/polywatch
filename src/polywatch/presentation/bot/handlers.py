@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Sequence
+from decimal import Decimal
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
@@ -28,6 +29,10 @@ from aiogram.types import (
 from polywatch.application.dto.settings import WatchEntry
 from polywatch.application.use_cases.bot_status import BotStatus
 from polywatch.application.use_cases.list_results import ListResults
+from polywatch.application.use_cases.manage_alerts import (
+    InvalidAlertSettingError,
+    ManageAlerts,
+)
 from polywatch.application.use_cases.manage_settings import (
     InvalidAssetError as SettingsInvalidAssetError,
 )
@@ -54,7 +59,8 @@ HELP_TEXT = (
     "/results <aset> <5m|15m> [n] — hasil market terakhir\n"
     "/top [n] — wallet skor tertinggi (default 10, maks 25)\n"
     "/wallet <alamat> — statistik satu wallet\n"
-    "/watch <alamat> / /unwatch <alamat> — kelola watchlist wallet"
+    "/watch <alamat> / /unwatch <alamat> — kelola watchlist wallet\n"
+    "/alerts — pengaturan alert copy-trade"
 )
 
 
@@ -131,6 +137,55 @@ def markets_keyboard(entries: Sequence[WatchEntry]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def alerts_keyboard(values: dict[str, object]) -> InlineKeyboardMarkup:
+    """Tombol inline pengaturan alert; data = `alert:<field>:<value>`.
+
+    Pilihan terbatas: skor 50/60/70/80, size $50/$100/$500, cooldown
+    1/5/15 mnt, on/off. Nilai saat ini ditandai dengan tanda centang.
+    """
+    from polywatch.application.use_cases.manage_alerts import (
+        COOLDOWN_SEC_CHOICES,
+        MIN_SCORE_CHOICES,
+        MIN_USDC_CHOICES,
+    )
+
+    def _mark(current: object, choice: object) -> str:
+        return " (x)" if str(current) == str(choice) else ""
+
+    score_row = [
+        InlineKeyboardButton(
+            text=f"skor {s}{_mark(values['min_score'], s)}",
+            callback_data=f"alert:score:{s}",
+        )
+        for s in MIN_SCORE_CHOICES
+    ]
+    size_row = [
+        InlineKeyboardButton(
+            text=f"${u}{_mark(values['min_usdc'], u)}",
+            callback_data=f"alert:usdc:{u}",
+        )
+        for u in MIN_USDC_CHOICES
+    ]
+    cooldown_row = [
+        InlineKeyboardButton(
+            text=f"{c // 60} mnt{_mark(values['cooldown_sec'], c)}",
+            callback_data=f"alert:cooldown:{c}",
+        )
+        for c in COOLDOWN_SEC_CHOICES
+    ]
+    on_off = [
+        InlineKeyboardButton(
+            text=f"ON{_mark(values['enabled'], True)}",
+            callback_data="alert:enabled:on",
+        ),
+        InlineKeyboardButton(
+            text=f"OFF{_mark(values['enabled'], False)}",
+            callback_data="alert:enabled:off",
+        ),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[score_row, size_row, cooldown_row, on_off])
+
+
 def build_router(
     owner_chat_id: int,
     status_use_case: BotStatus,
@@ -139,6 +194,7 @@ def build_router(
     top_use_case: TopWallets | None = None,
     wallet_use_case: WalletDetail | None = None,
     watchlist_use_case: ManageWatchlist | None = None,
+    alerts_use_case: ManageAlerts | None = None,
 ) -> Router:
     """Router berisi seluruh handler perintah (tanpa middleware)."""
     router = Router(name="commands")
@@ -286,6 +342,57 @@ def build_router(
                 return
             await message.answer(_truncate(text))
 
+    if alerts_use_case is not None:
+
+        @router.message(Command("alerts"))
+        async def _alerts(message: Message) -> None:
+            values = await alerts_use_case.get(message.chat.id)
+            await message.answer(
+                _truncate(ManageAlerts.format(values)),
+                reply_markup=alerts_keyboard(values),
+            )
+
+        @router.callback_query(F.data.startswith("alert:"))
+        async def _alert_setting(callback: CallbackQuery) -> None:
+            parts = (callback.data or "").split(":")
+            if len(parts) != 3:
+                await callback.answer("Permintaan tidak dikenal.", show_alert=False)
+                return
+            _, field, raw = parts
+            try:
+                if field == "score":
+                    values = await alerts_use_case.set_min_score(
+                        callback.message.chat.id if callback.message else owner_chat_id,
+                        Decimal(raw),
+                    )
+                elif field == "usdc":
+                    values = await alerts_use_case.set_min_usdc(
+                        callback.message.chat.id if callback.message else owner_chat_id,
+                        Decimal(raw),
+                    )
+                elif field == "cooldown":
+                    values = await alerts_use_case.set_cooldown_sec(
+                        callback.message.chat.id if callback.message else owner_chat_id,
+                        int(raw),
+                    )
+                elif field == "enabled":
+                    values = await alerts_use_case.set_enabled(
+                        callback.message.chat.id if callback.message else owner_chat_id,
+                        raw == "on",
+                    )
+                else:
+                    await callback.answer("Pengaturan tidak dikenal.", show_alert=False)
+                    return
+            except (InvalidAlertSettingError, ValueError):
+                await callback.answer("Nilai tidak valid.", show_alert=False)
+                return
+            if isinstance(callback.message, Message):
+                await callback.message.edit_text(
+                    _truncate(ManageAlerts.format(values)),
+                    reply_markup=alerts_keyboard(values),
+                )
+            await callback.answer("Tersimpan.")
+
     return router
 
 
@@ -298,6 +405,7 @@ def build_dispatcher(
     top_use_case: TopWallets | None = None,
     wallet_use_case: WalletDetail | None = None,
     watchlist_use_case: ManageWatchlist | None = None,
+    alerts_use_case: ManageAlerts | None = None,
 ) -> Dispatcher:
     """Rakit Dispatcher: guard owner + router perintah (composition root)."""
     dp = Dispatcher()
@@ -312,6 +420,7 @@ def build_dispatcher(
             top_use_case=top_use_case,
             wallet_use_case=wallet_use_case,
             watchlist_use_case=watchlist_use_case,
+            alerts_use_case=alerts_use_case,
         )
     )
     return dp

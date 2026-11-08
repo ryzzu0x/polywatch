@@ -11,6 +11,8 @@ objek use case.
 from __future__ import annotations
 
 import logging
+import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -22,6 +24,12 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from polywatch import __version__
+from polywatch.application.ports import (
+    AlertSettingsRepository as AlertSettingsRepositoryPort,
+)
+from polywatch.application.ports import (
+    AlertsSentRepository as AlertsSentRepositoryPort,
+)
 from polywatch.application.ports import Clock
 from polywatch.application.ports import MarketRepository as MarketRepositoryPort
 from polywatch.application.ports import (
@@ -39,9 +47,11 @@ from polywatch.application.ports import WatchConfigRepository as WatchConfigRepo
 from polywatch.application.ports import WatchlistRepository as WatchlistRepositoryPort
 from polywatch.application.use_cases.bot_status import BotStatus
 from polywatch.application.use_cases.list_results import ListResults
+from polywatch.application.use_cases.manage_alerts import ManageAlerts
 from polywatch.application.use_cases.manage_settings import ManageSettings
 from polywatch.application.use_cases.manage_watchlist import ManageWatchlist
 from polywatch.application.use_cases.wallet_views import TopWallets, WalletDetail
+from polywatch.domain.trade import Trade
 from polywatch.infrastructure.clock import SystemClock
 from polywatch.main.config import Settings
 
@@ -72,6 +82,7 @@ class Container:
     top_wallets: TopWallets | None = field(default=None, repr=False)
     wallet_detail: WalletDetail | None = field(default=None, repr=False)
     manage_watchlist: ManageWatchlist | None = field(default=None, repr=False)
+    manage_alerts: ManageAlerts | None = field(default=None, repr=False)
     ingest_hooks: list[Any] = field(default_factory=list, repr=False)
 
     @classmethod
@@ -139,6 +150,22 @@ class Container:
 
         return SqlAlchemyWatchlistRepository(self.session_factory())
 
+    def _alert_settings_repo(self) -> AlertSettingsRepositoryPort:
+        """Repository alert_settings pada session sendiri."""
+        from polywatch.infrastructure.db.repositories.alert_repository import (
+            SqlAlchemyAlertSettingsRepository,
+        )
+
+        return SqlAlchemyAlertSettingsRepository(self.session_factory())
+
+    def _alerts_sent_repo(self) -> AlertsSentRepositoryPort:
+        """Repository alerts_sent pada session sendiri."""
+        from polywatch.infrastructure.db.repositories.alert_repository import (
+            SqlAlchemyAlertsSentRepository,
+        )
+
+        return SqlAlchemyAlertsSentRepository(self.session_factory())
+
     async def setup_bot(self) -> None:
         """Rakit use case bot + dispatcher (dipanggil runner, bukan --check)."""
         from aiogram import Bot
@@ -157,6 +184,8 @@ class Container:
         self.top_wallets = TopWallets(wallet_stats)
         self.wallet_detail = WalletDetail(wallet_stats, users, watchlist)
         self.manage_watchlist = ManageWatchlist(users, watchlist)
+        alert_settings = self._alert_settings_repo()
+        self.manage_alerts = ManageAlerts(users, alert_settings)
         bot = Bot(token=self.settings.bot_token.get_secret_value())
         self._bot = bot
         self._dispatcher = build_dispatcher(
@@ -168,10 +197,131 @@ class Container:
             top_use_case=self.top_wallets,
             wallet_use_case=self.wallet_detail,
             watchlist_use_case=self.manage_watchlist,
+            alerts_use_case=self.manage_alerts,
         )
         logger.info(
             "use case bot dirakit",
             extra={"event": "container_bot_setup", "version": __version__},
+        )
+
+    def setup_ingest(self) -> None:
+        """Rakit IngestTrades dengan hook on_saved → evaluate_alert (T-017).
+
+        Hook hanya dipasang bila method ini dipanggil; perilaku runner tanpa
+        hook tidak berubah. Trade yang tersimpan langsung dievaluasi alert.
+        """
+        from polywatch.application.use_cases.evaluate_alert import EvaluateAlert
+        from polywatch.application.use_cases.ingest_trades import IngestTrades
+        from polywatch.infrastructure.db.repositories.alert_repository import (
+            SqlAlchemyAlertSettingsRepository,
+            SqlAlchemyAlertsSentRepository,
+        )
+        from polywatch.infrastructure.db.repositories.live_token_query import (
+            SqlAlchemyLiveTokenQuery,
+        )
+        from polywatch.infrastructure.db.repositories.market_repository import (
+            SqlAlchemyMarketRepository,
+        )
+        from polywatch.infrastructure.db.repositories.trade_repository import (
+            SqlAlchemyTradeRepository,
+        )
+        from polywatch.infrastructure.db.repositories.user_repository import (
+            SqlAlchemyUserRepository,
+        )
+        from polywatch.infrastructure.db.repositories.wallet_stats_repository import (
+            SqlAlchemyWalletStatsRepository,
+        )
+        from polywatch.infrastructure.db.repositories.watchlist_repository import (
+            SqlAlchemyWatchlistRepository,
+        )
+        from polywatch.infrastructure.polymarket.polygon_rpc import PolygonRpcClient
+        from polywatch.infrastructure.polymarket.trade_stream import (
+            OrderbookWsAdapter,
+            PolygonReceiptAdapter,
+        )
+        from polywatch.infrastructure.telegram_notifier import TelegramNotifier
+
+        alert_session = self.session_factory()
+        markets = SqlAlchemyMarketRepository(alert_session)
+        users = SqlAlchemyUserRepository(alert_session)
+        wallet_stats = SqlAlchemyWalletStatsRepository(alert_session)
+        watchlist = SqlAlchemyWatchlistRepository(alert_session)
+        alert_settings = SqlAlchemyAlertSettingsRepository(alert_session)
+        alerts_sent = SqlAlchemyAlertsSentRepository(alert_session)
+        notifier = TelegramNotifier(
+            bot_token=self.settings.bot_token.get_secret_value(),
+            owner_chat_id=self.settings.owner_chat_id,
+        )
+        evaluator = EvaluateAlert(
+            wallet_stats=wallet_stats,
+            markets=markets,
+            users=users,
+            watchlist=watchlist,
+            settings_repo=alert_settings,
+            alerts_sent=alerts_sent,
+            notifier=notifier,
+            clock=self.clock,
+            telegram_id=self.settings.owner_chat_id,
+        )
+
+        async def on_saved(new_trades: Sequence[Trade]) -> None:
+            for trade in new_trades:
+                try:
+                    decision = await evaluator.evaluate(trade)
+                    if not decision.sent:
+                        logger.debug(
+                            "alert dilewati",
+                            extra={
+                                "event": "alert_skipped",
+                                "reason": decision.reason,
+                                "wallet": trade.wallet,
+                            },
+                        )
+                except Exception:
+                    # Gagal evaluasi satu trade tidak boleh menghentikan ingest.
+                    logger.exception(
+                        "evaluasi alert gagal",
+                        extra={"event": "alert_eval_error", "wallet": trade.wallet},
+                    )
+            try:
+                await alert_session.commit()
+            except Exception:
+                await alert_session.rollback()
+                logger.exception("commit alert gagal", extra={"event": "alert_commit_error"})
+
+        async def run_ingest_once() -> None:
+            session = self.session_factory()
+            try:
+                from polywatch.domain.market import Timeframe
+
+                live = SqlAlchemyLiveTokenQuery(session)
+                tokens = await live.live_tokens(list(Timeframe))
+                stream = OrderbookWsAdapter()
+                rpc = PolygonRpcClient(
+                    alchemy_url=os.environ.get("ALCHEMY_RPC_URL"),
+                )
+                ingest = IngestTrades(
+                    stream=stream,
+                    receipts=PolygonReceiptAdapter(rpc),
+                    trades=SqlAlchemyTradeRepository(session),
+                    markets=SqlAlchemyMarketRepository(session),
+                    token_markets=list(tokens),
+                    clock=self.clock,
+                    on_saved=on_saved,
+                )
+                stats = await ingest.run_once()
+                logger.info(
+                    "hook ingest siklus selesai",
+                    extra={"event": "ingest_cycle_done", "trades_saved": stats.trades_saved},
+                )
+                await session.commit()
+            finally:
+                await session.close()
+
+        self.ingest_hooks.append(run_ingest_once)
+        logger.info(
+            "ingest + alert hook dirakit",
+            extra={"event": "container_ingest_setup", "version": __version__},
         )
 
     async def aclose(self) -> None:
