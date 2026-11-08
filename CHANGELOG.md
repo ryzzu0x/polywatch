@@ -5,6 +5,34 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Fixed — T-029 (siklus lambat + alarm basi: paralelisasi, batch, ambang adaptif)
+- **Siklus discover 4–5 menit → < 21 detik:** fetch slug Gamma kini
+  paralel lewat `asyncio.gather` + `asyncio.Semaphore`
+  (`GAMMA_MAX_CONCURRENCY=5`); throttle adapter Gamma dibuat async
+  (`asyncio.sleep`, dipanggil di `_get_markets_page` — `time.sleep`
+  lama memblokir event loop sehingga gather tetap sekuensial, dan
+  throttle sebelumnya dead code); `fetch_delay_s` use case 0. Cache
+  negatif aset mati (TTL 10 menit) — aset tanpa market (xag/xau)
+  tidak di-query ulang.
+- **Siklus result 128,9 detik → < 10 detik:** `RESULT_BATCH_SIZE`
+  (default 10) membatasi market CLOSED per siklus; `record_result`
+  mempoll tiap market sekali per siklus — belum resolved ditunda ke
+  siklus berikutnya (dulu menunggu polling resolusi Gamma di dalam
+  siklus); timeout dinilai dari umur market (`end_at` + `timeout_sec`);
+  sweep dibatasi batch (default 50 kandidat).
+- **Alarm basi (BUG-011) — ambang adaptif:** `STALE_DISCOVER_S`/
+  `STALE_RESULT_S` (default 300) kini floor; ambang efektif =
+  `max(3x durasi siklus terukur, floor)`; `record_cycle(kind, ok,
+  duration_s)`. Interval scheduler default 30 → 60 dtk.
+- **Observabilitas:** `duration_ms` di log semua siklus
+  (`scheduler_cycle_duration`, `record_result_cycle`,
+  `market_sweep_done`, `discover_markets selesai`).
+- Bukti run nyata (satu instance, `timeout 600`, 16:30–16:40Z):
+  discover max 20.389 ms, result max 9.204 ms (17 siklus);
+  `health_stale` = 0 sepanjang run; market LIVE `end_at > now()` > 0
+  sepanjang run; `trades` 9.347 → 19.215 (+9.868); `market_results`
+  683 → 717 (+34). 393 → 415 test.
+
 ### Fixed — T-028 (market tidak mengalir: status beku + ingest market selesai + banjir log Gamma)
 - **Bug 1 (status market tidak pernah maju):** seluruh 38 market
   berstatus LIVE sudah lewat `end_at` (`status='LIVE' and end_at >
