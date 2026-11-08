@@ -87,7 +87,10 @@ class DiscoverMarkets:
     ahead_windows: int = DEFAULT_AHEAD_WINDOWS
     past_windows: int = DEFAULT_PAST_WINDOWS
     max_end_age_hours: float = DEFAULT_MAX_END_AGE_HOURS
-    fetch_delay_s: float = 0.25
+    #: T-029: sleep antar-request TIDAK lagi dipakai di jalur paralel —
+    #: pacing ≤5 req/s dijaga adapter Gamma (`_throttle` async, dipanggil
+    #: per request). Field tetap untuk kompatibilitas jalur supplement.
+    fetch_delay_s: float = 0.0
     #: T-029: konkurensi maksimum request Gamma per siklus (semaphore).
     #: Pacing per-request tetap dijaga adapter Gamma (≤5 req/s).
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY

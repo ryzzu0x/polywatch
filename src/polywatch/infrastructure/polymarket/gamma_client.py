@@ -168,13 +168,18 @@ class GammaMarketSource:
         self._base_url = base_url.rstrip("/")
         self._last_fetch_monotonic = 0.0
 
-    def _throttle(self) -> None:
-        """Jeda minimum antar-request slug — rate limit Gamma ≤5 req/s (T-024)."""
+    async def _throttle(self) -> None:
+        """Jeda minimum antar-request slug — rate limit Gamma ≤5 req/s (T-024).
+
+        T-029: async — `time.sleep` memblokir event loop dan membuat
+        `asyncio.gather` di discover sekuensial (durasi siklus 99 dtk);
+        `asyncio.sleep` menjaga pacing ≤5 req/s tanpa memblokir.
+        """
         now_mono = asyncio.get_running_loop().time()
         elapsed = now_mono - self._last_fetch_monotonic
         if elapsed < _SLUG_FETCH_INTERVAL:
-            time.sleep(_SLUG_FETCH_INTERVAL - elapsed)
-        self._last_fetch_monotonic = time.monotonic()
+            await asyncio.sleep(_SLUG_FETCH_INTERVAL - elapsed)
+        self._last_fetch_monotonic = asyncio.get_running_loop().time()
 
     async def list_markets(
         self, timeframe: Timeframe, *, window_seconds: int | None = None
@@ -221,6 +226,7 @@ class GammaMarketSource:
         last_error: Exception | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
+                await self._throttle()
                 async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                     response = await client.get(url, params=params)
                 response.raise_for_status()
