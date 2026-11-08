@@ -1,0 +1,102 @@
+# market live: ['zec-updown-5m-1794115800', 'btc-updown-5m-1794115800']
+{
+  "summary": {
+    "event_types": {
+      "book": 866,
+      "price_change": 28302,
+      "last_trade_price": 433,
+      "PONG": 16,
+      "tick_size_change": 8
+    },
+    "n_latency_events": 28735,
+    "latency_ms_median": 82,
+    "latency_ms_p90": 83,
+    "latency_ms_max": 436,
+    "close_code": null,
+    "close_reason": null,
+    "idle_timeout_hit": false
+  },
+  "field_examples": {
+    "price_change": [
+      {
+        "market": "0x08b70b21c02d45fdc5c1fcdaca114a8d18aae14ba81b4f28dfea3ccf926a4dd8",
+        "price_changes": [
+          {
+            "asset_id": "21123101581617419403920540061703361951908042221083646803141437326263172377036",
+            "price": "0.52",
+            "size": "20",
+            "side": "BUY",
+            "hash": "88ab6e5d7d306df6da9554116dd581ea5de96de7",
+            "best_bid": "0.62",
+            "best_ask": "0.63"
+          },
+          {
+            "asset_id": "100278339518853015834022507989576731480518373840166420854182867049394952183386",
+            "price": "0.48",
+            "size": "20",
+            "side": "SELL",
+            "hash": "88ccb26de80366d5a04b6c72128990cbac12d72c",
+            "best_bid": "0.37",
+            "best_ask": "0.38"
+          }
+        ],
+        "timestamp": "1794116001565",
+        "event_type": "price_change"
+      },
+      {
+        "market": "0x08b70b21c02d45fdc5c1fcdaca114a8d18aae14ba81b4f28dfea3ccf926a4dd8",
+        "price_changes": [
+          {
+            "asset_id": "21123101581617419403920540061703361951908042221083646803141437326263172377036",
+            "price": "0.01",
+            "size": "6204.47",
+            "side": "BUY",
+            "hash": "cc37d7ff180cb9e0b68168383b68edf57fba0fe1",
+            "best_bid": "0.62",
+            "best_ask": "0.63"
+          },
+          {
+            "asset_id": "100278339518853015834022507989576731480518373840166420854182867049394952183386",
+            "price": "0.99",
+            "size": "6204.47",
+            "side": "SELL",
+            "hash": "40070c6c578876ef01323c866377afad832a03e6",
+            "best_bid": "0.37",
+            "best_ask": "0.38"
+          }
+        ],
+        "timestamp": "1794116001565",
+        "event_type": "price_change"
+      }
+    ],
+    "last_trade_price": [
+      {
+        "market": "0x08b70b21c02d45fdc5c1fcdaca114a8d18aae14ba81b4f28dfea3ccf926a4dd8",
+        "asset_id": "21123101581617419403920540061703361951908042221083646803141437326263172377036",
+        "price": "0.62",
+        "size": "82.5",
+        "fee_rate_bps": "0",
+        "side": "SELL",
+        "timestamp": "1794116001865",
+        "event_type": "last_trade_price",
+        "transaction_hash": "0xd2d637cdb5b7e19af9c535d71ba394e15d6559ac531cdf0e5146da9e191f83e7"
+      },
+      {
+        "market": "0x08b70b21c02d45fdc5c1fcdaca114a8d18aae14ba81b4f28dfea3ccf926a4dd8",
+        "asset_id": "100278339518853015834022507989576731480518373840166420854182867049394952183386",
+        "price": "0.38",
+        "size": "14.44",
+        "fee_rate_bps": "0",
+        "side": "BUY",
+        "timestamp": "1794116002624",
+        "event_type": "last_trade_price",
+        "transaction_hash": "0x1bb5d7cac9e54847183724cbe6b6cee1cdee9c4dd495b3b64bd44e52ef70ad61"
+      }
+    ]
+  },
+  "connect_log": [
+    "open",
+    "error: ConnectionClosedOK(Close(code=1000, reason='all subscribed assets resolved'), Close(code=1000, reason='all subscribed assets resolved'), True)"
+  ],
+  "tokens_subscribed": 4
+}

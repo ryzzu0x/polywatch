@@ -24,7 +24,7 @@
 | ADR-001 | Clean Architecture dengan aturan boundary di lint | Diterima |
 | ADR-002 | Python 3.12 + aiogram + PostgreSQL, monolith satu proses | Diterima |
 | ADR-003 | Skor wallet berbasis edge & ROI, bukan win rate | Diusulkan |
-| ADR-004 | Sumber trade: polling Data API v2 (MVP) | Diterima (spike T-005, 2026-11-08) |
+| ADR-004 | Sumber trade: polling Data API v2 (MVP), hybrid WS+poll di v1 | Diterima (spike T-005 & T-005b, 2026-11-08) |
 | ADR-005 | Sumber open/close price: Polymarket crypto-price (Chainlink), cadangan Binance | Diterima (spike T-005, 2026-11-08) |
 | ADR-006 | MVP alert saja; wallet & eksekusi di v2 dengan gate paper trading | Diterima |
 | ADR-007 | v2: wallet EVM per pengguna, kunci dienkripsi di server (kustodian) + ekspor oleh pengguna | Diterima |
@@ -55,9 +55,9 @@
 - **Alternatif:** Win rate murni (menyesatkan); PnL absolut (bias ke wallet bermodal besar).
 - **Konsekuensi:** (+) Sinyal lebih jujur. (−) Wallet baru butuh waktu sebelum bisa dinilai; parameter perlu dikalibrasi dengan data nyata di v1.
 
-### ADR-004 — Sumber trade: polling Data API v2 (MVP)
+### ADR-004 — Sumber trade: polling Data API v2 (MVP), hybrid WS+poll di v1
 - **Tanggal:** 2026-11-08
-- **Status:** Diterima (diverifikasi spike T-005 dengan angka nyata; laporan: `docs/spikes/T-005-sumber-data.md`)
+- **Status:** Diterima (diverifikasi spike T-005 dan spike T-005b dengan angka nyata; laporan: `docs/spikes/T-005-sumber-data.md`, `docs/spikes/T-005b-websocket.md`)
 - **Konteks:** Perlu trade per wallet dengan delay rendah. Pengecekan awal: Data API `/trades?market=<conditionId>` mengembalikan trade dengan alamat wallet.
 - **Temuan spike (2026-11-08):**
   - Data API **v1 sudah pensiun (HTTP 410)**; wajib `https://data-api.polymarket.com/v2/trades`.
@@ -70,6 +70,13 @@
 - **Keputusan:** Polling `GET /v2/trades?condition=<conditionId>&limit=500` dengan cursor, insert idempoten (`transaction_hash`+`token_id`+`price`+`size`+`timestamp`), jeda antar poll 2–3 s, total ≤ 5 req/s.
 - **Alternatif:** Event on-chain Polygon (OrderFilled) via RPC websocket — paling cepat & lengkap tetapi lebih kompleks (decode log, pemetaan token → market, biaya RPC). Karena latency polling terukur menit-bukan-detik, event on-chain naik prioritas untuk v1.
 - **Konsekuensi:** (+) Cepat dibangun, field cukup untuk skor wallet. (−) Delay data trade median ~2,7 menit → analisis delay (TD-001) harus pakai `timestamp` trade, bukan waktu insert.
+- **Temuan tambahan spike T-005b (CLOB WebSocket market channel, 2026-11-08):**
+  - `wss://ws-subscriptions-clob.polymarket.com/ws/market` + subscribe `{"assets_ids": [...], "type": "market"}` bekerja publik tanpa API key; server minta heartbeat text-frame `"PING"`/`"PONG"`.
+  - Event: `book`, `price_change`, `last_trade_price`, `tick_size_change`. `last_trade_price` memuat `transaction_hash`, `price`, `size`, `side`, `timestamp`, `fee_rate_bps`, `market` — **TIDAK memuat alamat wallet** (tidak ada `proxy_wallet`/maker/taker).
+  - **Latency event→terima: median ~81 ms, p90 ~85 ms, max 592 ms** (49.422 event, 3 run × 5,5 mnt, market 5m ramai) — jauh di bawah target ≤ 10 s.
+  - Trade WS ↔ Data API cocok satu-satu via `transaction_hash`; wallet hanya tersedia di Data API.
+  - Server menutup koneksi (close 1000, `"all subscribed assets resolved"`) saat semua market resolve → **reconnect + re-subscribe wajib** tiap siklus; batas token per koneksi tidak terukur (diuji 4 token).
+- **Konsekuensi tambahan:** WS market channel hanya untuk **harga real-time** (mis. harga sekarang di alert T-017) dan di v1 sebagai *detector* (`transaction_hash`) yang memicu poll Data API untuk mengambil `proxy_wallet` — hybrid WS+poll. Ingest on-chain OrderFilled (backlog v1) tetap satu-satunya jalur satu-hop untuk alert per wallet ≤ 10 s.
 
 ### ADR-005 — Sumber open/close price: Polymarket crypto-price (Chainlink selaras), cadangan Binance
 - **Tanggal:** 2026-11-08

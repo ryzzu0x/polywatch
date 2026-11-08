@@ -33,6 +33,9 @@
   - Data API: pagination/cursor, rate limit, latency trade → tersedia; field `proxyWallet`, sisi, outcome
   - Open/close price: bandingkan Chainlink vs sumber publik lain terhadap 50 resolusi resmi
   - *Selesai jika:* ADR-004 & ADR-005 ditulis dengan angka nyata
+- [x] **T-005b · Spike CLOB WebSocket market channel** — M
+  - Latency event `price_change`/`last_trade_price`, field identitas trade, ketahanan koneksi
+  - *Selesai jika:* pernyataan tegas "cukup/tidak" untuk target ≤ 10 s dan kejelasan apakah WS membawa alamat wallet; ADR-004 diperbarui (`docs/spikes/T-005b-websocket.md`)
 
 ## M1 — Discovery Market & Arsip Hasil (F1, F2)
 
@@ -92,7 +95,7 @@
 ## Backlog (Belum Dijadwalkan)
 
 - [ ] v1: Paper copy-trade + laporan ROI harian/mingguan
-- [ ] v1: Ingest via event on-chain Polygon bila latency polling kurang
+- [ ] v1: Ingest via event on-chain Polygon bila latency polling kurang (OrderFilled memuat wallet; WS market channel T-005b terbukti cepat ~80 ms tetapi TANPA alamat wallet → hanya sebagai detector hybrid WS+poll)
 - [ ] v2: Multi-user (users, pengaturan per pengguna)
 - [ ] v2: Generate wallet EVM otomatis saat `/start` + enkripsi private key
 - [ ] v2: Deposit/withdraw USDC, approval, kredensial CLOB per pengguna
@@ -121,3 +124,4 @@
 | 2026-11-08 | T-007 | Selesai | GammaMarketSource (retry+backoff+jitter, parsing clobTokenIds/outcomes tahan error, jendela end_date now-1j..now+3j, offset ≤2000), use case discover_markets (auto-detect aset/timeframe dari slug), MarketRepository PostgreSQL (upsert ON CONFLICT condition_id, asset auto-create, status tak mundur); verifikasi live discover 2× = 24 market/8 aset/0 duplikat; 106 test hijau |
 | 2026-11-08 | T-008 | Selesai | WatchConfigRepository PostgreSQL (upsert ON CONFLICT uq_watch_config) + UserRepository (get_or_create idempoten) + use case manage_settings (set_watch_enabled/list_watch/enabled_assets; validasi domain, aset harus terdaftar); test filter enabled membuktikan market yang dinonaktifkan tidak diproses siklus berikutnya |
 | 2026-11-08 | T-009 | Selesai | PolymarketPriceSource (crypto-price Chainlink) + BinancePriceSource (klines 1m) cadangan, use case record_result (poll 30s, timeout 15 mnt → notifikasi owner sekali per market, outcome dari outcomePrices, price_source selalu terisi, idempoten), TelegramNotifier; verifikasi runtime 50 sampel ditunda ke QA T-022 |
+| 2026-11-08 | T-005b | Selesai | Spike CLOB WS market channel: subscribe `{"assets_ids":[...],"type":"market"}` ok (PING/PONG); latency median ~81 ms / p90 ~85 ms / max 592 ms (49.422 event, 3 run 5,5 mnt); `last_trade_price` memuat tx_hash/price/size/side/timestamp TAPI TANPA alamat wallet → WS cukup untuk harga real-time & detector, wallet tetap lewat Data API/on-chain; close 1000 "all subscribed assets resolved" → reconnect wajib; ADR-004 diperbarui; laporan `docs/spikes/T-005b-websocket.md` |
