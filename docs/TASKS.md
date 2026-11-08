@@ -78,7 +78,7 @@
 - [x] **T-017 · `evaluate_alert` + formatter + `/alerts`** — M
   - Ambang skor, size minimal, cooldown, harga sekarang, link market, catat `delay_ms`
   - *Selesai jika:* kriteria F5 lulus; median delay ≤ 10 dtk dalam 24 jam lokal (verifikasi 24 jam lokal ditunda ke QA T-022)
-- [ ] **T-018 · E2E core flow** — M
+- [x] **T-018 · E2E core flow** — M
   - market → trade → alert → resolve → skor dengan sumber palsu + DB nyata
   - *Selesai jika:* test e2e hijau di CI
 
