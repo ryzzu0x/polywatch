@@ -23,10 +23,10 @@
 - [x] **T-002 · CI GitHub Actions** — S
   - Workflow: install → ruff → mypy → import-linter → pytest (dengan service PostgreSQL)
   - *Selesai jika:* PR contoh hijau
-- [ ] **T-003 · Config env, composition root, logging JSON** — S
+- [x] **T-003 · Config env, composition root, logging JSON** — S
   - Validasi env (pydantic-settings), container, entrypoint, heartbeat
   - *Selesai jika:* app start dengan env valid, gagal jelas dengan env tidak lengkap
-- [ ] **T-004 · PostgreSQL lokal + Alembic + migrasi awal** — M
+- [x] **T-004 · PostgreSQL lokal + Alembic + migrasi awal** — M
   - DB `polywatch_db`/`polywatch_test`, role `polywatch_app`, tabel sesuai ARCHITECTURE §4 (tanpa tabel v2)
   - *Selesai jika:* `alembic upgrade head` dan `downgrade base` berjalan bersih
 - [ ] **T-005 · Spike sumber data** — M
@@ -114,3 +114,5 @@
 | 2026-11-08 | Planning | Disetujui | Owner menyetujui ADR-002 (Python) & ADR-007 (kustodian + ekspor key) |
 | 2026-11-08 | T-001 | Selesai | Struktur Clean Architecture, config env tervalidasi, logging JSON, ruff/mypy strict/import-linter/pytest 27 test hijau |
 | 2026-11-08 | T-002 | Selesai | Workflow CI `.github/workflows/ci.yml` (ruff, mypy, import-linter, pytest) |
+| 2026-11-08 | T-003 | Selesai | Runner heartbeat (port Clock, SIGINT/SIGTERM), composition root engine/session DB lazy, redaksi secret di logging JSON, CLI default menjalankan runner; 44 test hijau; branch `feature/m0-fondasi` |
+| 2026-11-08 | T-004 | Selesai | Role `polywatch_app` + DB lokal, model SQLAlchemy 2 async, Alembic (env baca Settings), migrasi awal 11 tabel MVP + index/unique §4; upgrade/downgrade/upgrade bersih; integration test via `TEST_DATABASE_URL` (auto-skip) |

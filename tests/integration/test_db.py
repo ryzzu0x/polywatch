@@ -20,8 +20,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from polywatch.domain.market import MarketStatus, Timeframe
-from polywatch.domain.market import Outcome
+from polywatch.domain.market import MarketStatus, Outcome, Timeframe
 from polywatch.domain.trade import Action
 from polywatch.infrastructure.db.models import (
     AssetModel,
