@@ -1,0 +1,96 @@
+[project]
+name = "polywatch"
+version = "0.1.0"
+description = "Arsip hasil market Up/Down Polymarket, skor wallet, dan alert copy-trade ke Telegram"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+dependencies = [
+    "aiogram>=3.13",
+    "httpx>=0.27",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.13",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+    "ruff>=0.7",
+    "mypy>=1.11",
+    "import-linter>=2.0",
+]
+
+[project.scripts]
+polywatch = "polywatch.main.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/polywatch"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ASYNC", "C4", "PT"]
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+files = ["src", "tests"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["aiogram.*", "asyncpg.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["src"]
+addopts = "-ra"
+
+[tool.importlinter]
+root_packages = ["polywatch"]
+
+[[tool.importlinter.contracts]]
+name = "domain tidak bergantung pada layer lain"
+type = "forbidden"
+source_modules = ["polywatch.domain"]
+forbidden_modules = [
+    "polywatch.application",
+    "polywatch.infrastructure",
+    "polywatch.presentation",
+    "polywatch.main",
+]
+
+[[tool.importlinter.contracts]]
+name = "application tidak bergantung pada adapter"
+type = "forbidden"
+source_modules = ["polywatch.application"]
+forbidden_modules = [
+    "polywatch.infrastructure",
+    "polywatch.presentation",
+    "polywatch.main",
+]
+
+[[tool.importlinter.contracts]]
+name = "adapter infrastruktur dan presentasi tidak saling bergantung"
+type = "independence"
+modules = ["polywatch.infrastructure", "polywatch.presentation"]

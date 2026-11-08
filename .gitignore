@@ -1,0 +1,45 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# --- Virtualenv & tooling ---
+.venv/
+venv/
+.uv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# --- Secrets & konfigurasi lokal ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Database & artefak runtime ---
+*.db
+*.sqlite3
+*.dump
+*.sql.gz
+logs/
+*.log
+
+# --- Editor & OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
