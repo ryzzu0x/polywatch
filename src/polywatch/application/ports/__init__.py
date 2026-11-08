@@ -19,6 +19,7 @@ from polywatch.application.ports.sources import (
     TradeEventStream,
     TradeSource,
 )
+from polywatch.application.ports.watchlist import WatchlistRepository
 
 __all__ = [
     "AlertSettingsRepository",
@@ -36,4 +37,5 @@ __all__ = [
     "UserRepository",
     "WalletStatsRepository",
     "WatchConfigRepository",
+    "WatchlistRepository",
 ]

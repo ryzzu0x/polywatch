@@ -35,7 +35,9 @@ from polywatch.application.use_cases.manage_settings import (
     ManageSettings,
     UnknownAssetError,
 )
-from polywatch.domain.errors import InvalidAssetError
+from polywatch.application.use_cases.manage_watchlist import ManageWatchlist
+from polywatch.application.use_cases.wallet_views import TopWallets, WalletDetail
+from polywatch.domain.errors import InvalidAssetError, InvalidWalletError
 from polywatch.domain.market import Timeframe
 
 logger = logging.getLogger("polywatch.bot")
@@ -49,7 +51,10 @@ HELP_TEXT = (
     "Perintah:\n"
     "/status — ringkasan status bot\n"
     "/markets — daftar aset yang dipantau + toggle on/off\n"
-    "/results <aset> <5m|15m> [n] — hasil market terakhir"
+    "/results <aset> <5m|15m> [n] — hasil market terakhir\n"
+    "/top [n] — wallet skor tertinggi (default 10, maks 25)\n"
+    "/wallet <alamat> — statistik satu wallet\n"
+    "/watch <alamat> / /unwatch <alamat> — kelola watchlist wallet"
 )
 
 
@@ -131,6 +136,9 @@ def build_router(
     status_use_case: BotStatus,
     settings_use_case: ManageSettings,
     results_use_case: ListResults,
+    top_use_case: TopWallets | None = None,
+    wallet_use_case: WalletDetail | None = None,
+    watchlist_use_case: ManageWatchlist | None = None,
 ) -> Router:
     """Router berisi seluruh handler perintah (tanpa middleware)."""
     router = Router(name="commands")
@@ -215,6 +223,69 @@ def build_router(
             return
         await message.answer(_truncate(text))
 
+    if top_use_case is not None:
+
+        @router.message(Command("top"))
+        async def _top(message: Message) -> None:
+            args = (message.text or "").split()[1:]
+            limit: int | None = None
+            if args:
+                try:
+                    limit = int(args[0])
+                except ValueError:
+                    await message.answer("Jumlah baris harus angka. Contoh: /top 15")
+                    return
+            await message.answer(_truncate(await top_use_case.execute(limit)))
+
+    if wallet_use_case is not None:
+
+        @router.message(Command("wallet"))
+        async def _wallet(message: Message) -> None:
+            args = (message.text or "").split()[1:]
+            if not args:
+                await message.answer("Pemakaian: /wallet <alamat>")
+                return
+            try:
+                text = await wallet_use_case.execute(message.chat.id, args[0])
+            except InvalidWalletError:
+                await message.answer(
+                    "Alamat wallet tidak valid. Contoh: 0x diikuti 40 karakter heksadesimal."
+                )
+                return
+            await message.answer(_truncate(text))
+
+    if watchlist_use_case is not None:
+
+        @router.message(Command("watch"))
+        async def _watch(message: Message) -> None:
+            args = (message.text or "").split()[1:]
+            if not args:
+                await message.answer("Pemakaian: /watch <alamat>")
+                return
+            try:
+                text = await watchlist_use_case.watch(message.chat.id, args[0])
+            except InvalidWalletError:
+                await message.answer(
+                    "Alamat wallet tidak valid. Contoh: 0x diikuti 40 karakter heksadesimal."
+                )
+                return
+            await message.answer(_truncate(text))
+
+        @router.message(Command("unwatch"))
+        async def _unwatch(message: Message) -> None:
+            args = (message.text or "").split()[1:]
+            if not args:
+                await message.answer("Pemakaian: /unwatch <alamat>")
+                return
+            try:
+                text = await watchlist_use_case.unwatch(message.chat.id, args[0])
+            except InvalidWalletError:
+                await message.answer(
+                    "Alamat wallet tidak valid. Contoh: 0x diikuti 40 karakter heksadesimal."
+                )
+                return
+            await message.answer(_truncate(text))
+
     return router
 
 
@@ -224,13 +295,24 @@ def build_dispatcher(
     status_use_case: BotStatus,
     settings_use_case: ManageSettings,
     results_use_case: ListResults,
+    top_use_case: TopWallets | None = None,
+    wallet_use_case: WalletDetail | None = None,
+    watchlist_use_case: ManageWatchlist | None = None,
 ) -> Dispatcher:
     """Rakit Dispatcher: guard owner + router perintah (composition root)."""
     dp = Dispatcher()
     dp.message.middleware(OwnerOnlyMiddleware(owner_chat_id))
     dp.callback_query.middleware(OwnerOnlyMiddleware(owner_chat_id))
     dp.include_router(
-        build_router(owner_chat_id, status_use_case, settings_use_case, results_use_case)
+        build_router(
+            owner_chat_id,
+            status_use_case,
+            settings_use_case,
+            results_use_case,
+            top_use_case=top_use_case,
+            wallet_use_case=wallet_use_case,
+            watchlist_use_case=watchlist_use_case,
+        )
     )
     return dp
 

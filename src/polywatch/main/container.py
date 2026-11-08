@@ -34,10 +34,14 @@ from polywatch.application.ports import (
     TradeStatsRepository as TradeStatsRepositoryPort,
 )
 from polywatch.application.ports import UserRepository as UserRepositoryPort
+from polywatch.application.ports import WalletStatsRepository as WalletStatsRepositoryPort
 from polywatch.application.ports import WatchConfigRepository as WatchConfigRepositoryPort
+from polywatch.application.ports import WatchlistRepository as WatchlistRepositoryPort
 from polywatch.application.use_cases.bot_status import BotStatus
 from polywatch.application.use_cases.list_results import ListResults
 from polywatch.application.use_cases.manage_settings import ManageSettings
+from polywatch.application.use_cases.manage_watchlist import ManageWatchlist
+from polywatch.application.use_cases.wallet_views import TopWallets, WalletDetail
 from polywatch.infrastructure.clock import SystemClock
 from polywatch.main.config import Settings
 
@@ -65,6 +69,9 @@ class Container:
     bot_status: BotStatus | None = field(default=None, repr=False)
     manage_settings: ManageSettings | None = field(default=None, repr=False)
     list_results: ListResults | None = field(default=None, repr=False)
+    top_wallets: TopWallets | None = field(default=None, repr=False)
+    wallet_detail: WalletDetail | None = field(default=None, repr=False)
+    manage_watchlist: ManageWatchlist | None = field(default=None, repr=False)
     ingest_hooks: list[Any] = field(default_factory=list, repr=False)
 
     @classmethod
@@ -116,6 +123,22 @@ class Container:
             SqlAlchemyWatchConfigRepository(session),
         )
 
+    def _wallet_stats_repo(self) -> WalletStatsRepositoryPort:
+        """Repository wallet_stats pada session sendiri."""
+        from polywatch.infrastructure.db.repositories.wallet_stats_repository import (
+            SqlAlchemyWalletStatsRepository,
+        )
+
+        return SqlAlchemyWalletStatsRepository(self.session_factory())
+
+    def _watchlist_repo(self) -> WatchlistRepositoryPort:
+        """Repository watchlist pada session sendiri."""
+        from polywatch.infrastructure.db.repositories.watchlist_repository import (
+            SqlAlchemyWatchlistRepository,
+        )
+
+        return SqlAlchemyWatchlistRepository(self.session_factory())
+
     async def setup_bot(self) -> None:
         """Rakit use case bot + dispatcher (dipanggil runner, bukan --check)."""
         from aiogram import Bot
@@ -126,9 +149,14 @@ class Container:
         owner = self.settings.owner_chat_id
         market_stats = cast(MarketStatsRepositoryPort, markets)
         trade_stats = cast(TradeStatsRepositoryPort, trades)
+        wallet_stats = self._wallet_stats_repo()
+        watchlist = self._watchlist_repo()
         self.bot_status = BotStatus(market_stats, trade_stats, self.clock)
         self.manage_settings = ManageSettings(users, watch)
         self.list_results = ListResults(market_stats)
+        self.top_wallets = TopWallets(wallet_stats)
+        self.wallet_detail = WalletDetail(wallet_stats, users, watchlist)
+        self.manage_watchlist = ManageWatchlist(users, watchlist)
         bot = Bot(token=self.settings.bot_token.get_secret_value())
         self._bot = bot
         self._dispatcher = build_dispatcher(
@@ -137,6 +165,9 @@ class Container:
             status_use_case=self.bot_status,
             settings_use_case=self.manage_settings,
             results_use_case=self.list_results,
+            top_use_case=self.top_wallets,
+            wallet_use_case=self.wallet_detail,
+            watchlist_use_case=self.manage_watchlist,
         )
         logger.info(
             "use case bot dirakit",
