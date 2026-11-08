@@ -72,11 +72,17 @@ class TradeStatsRepository(Protocol):
 
 
 class HealthActivityRepository(Protocol):
-    """Bacaan aktivitas untuk health monitor (T-019).
+    """Bacaan aktivitas untuk health monitor (T-019/T-027).
 
-    Interface segregation: HealthMonitor hanya butuh satu bacaan ringan,
-    tidak seluruh port persistensi trade.
+    Interface segregation: HealthMonitor hanya butuh bacaan ringan,
+    tidak seluruh port persistensi trade. T-027: `live_market_count`
+    menentukan relevansi alarm ingest (tanpa market LIVE → tidak alarm);
+    `last_trade_at_live` hanya informasi tambahan, bukan pemicu.
     """
+
+    async def live_market_count(self) -> int:
+        """Jumlah market berstatus LIVE (0 bila tidak ada)."""
+        ...
 
     async def last_trade_at_live(self) -> datetime | None:
         """Waktu trade terakhir pada market berstatus LIVE (None bila kosong)."""

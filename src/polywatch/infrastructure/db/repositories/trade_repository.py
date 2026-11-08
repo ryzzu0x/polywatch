@@ -76,13 +76,22 @@ class SqlAlchemyTradeRepository:
         return await self._session.scalar(stmt)
 
     async def last_trade_at_live(self) -> datetime | None:
-        """Waktu trade terakhir pada market berstatus LIVE (health monitor T-019)."""
+        """Waktu trade terakhir pada market berstatus LIVE (health T-019; T-027: info tambahan)."""
         stmt = select(func.max(TradeModel.traded_at)).where(
             TradeModel.market_id.in_(
                 select(MarketModel.id).where(MarketModel.status == MarketStatus.LIVE)
             )
         )
         return await self._session.scalar(stmt)
+
+    async def live_market_count(self) -> int:
+        """Jumlah market berstatus LIVE (health T-027: relevansi alarm ingest)."""
+        stmt = (
+            select(func.count())
+            .select_from(MarketModel)
+            .where(MarketModel.status == MarketStatus.LIVE)
+        )
+        return int(await self._session.scalar(stmt) or 0)
 
     async def wallets_for_market(self, market_id: int) -> Sequence[str]:
         """Wallet unik yang pernah trade di market ini (urut)."""

@@ -58,7 +58,7 @@ GAMMA = "https://gamma-api.polymarket.com"
 FIXTURE = Path("docs/spikes/t005-gamma-market-sample.json")
 
 _TEST_ENV = {
-    "BOT_TOKEN": "t",
+    "BOT_TOKEN": "123456:TEST-token-format-valid",
     "OWNER_CHAT_ID": "1",
     "DATABASE_URL": TEST_DSN or "",
     "POLYMARKET_GAMMA_URL": GAMMA,
@@ -170,3 +170,95 @@ def test_contract_symbol_volume_decimal() -> None:
     tokens = json.loads(str(payload["clobTokenIds"]))
     assert len(tokens) == 2
     assert Decimal(str(payload["volume"])) >= 0
+
+
+async def test_monitor_record_cycle_diterima_lewat_container_urutan_cli(
+    engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T-027 regresi urutan perakitan: setup_health SEBELUM setup_scheduler.
+
+    Sebelum perbaikan, CLI memanggil `setup_scheduler()` dulu — saat task
+    scheduler dibuat `container.health_monitor` masih None → `record_cycle`
+    tidak pernah dipanggil → discover/result selalu "belum ada aktivitas"
+    → alarm palsu. Test ini merakit container dengan URUTAN CLI (health →
+    scheduler → ingest) dan membuktikan `record_cycle` benar-benar terpanggil
+    setelah ≥1 siklus scheduler.
+    """
+    now = datetime.now(tz=UTC)
+    live = [_live_payload(_slug_5m(now, 0)), _live_payload(_slug_5m(now, 1))]
+
+    class _RecordingMonitor:
+        """Perekam panggilan record_cycle — dipasang setelah setup_health."""
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, bool]] = []
+
+        async def record_cycle(self, kind: str, ok: bool) -> None:
+            self.calls.append((kind, ok))
+
+    with respx.mock(base_url=GAMMA) as mock:
+        mock.get("/markets").mock(return_value=httpx.Response(200, json=live))
+        settings = Settings.model_validate({**_TEST_ENV, "MARKET_ASSETS": ("btc",)})
+        container = Container.build(settings)
+        stop = asyncio.Event()
+        recorder = _RecordingMonitor()
+        try:
+            # Urutan CLI (T-027): health duluan, scheduler belakangan.
+            container.setup_health()
+            assert container.health_monitor is not None
+            container.setup_scheduler()
+            # Ganti monitor dengan perekam — container field yang sama yang
+            # dibaca runner/scheduler, membuktikan wiring pakai objek hidup.
+            container.health_monitor = recorder  # type: ignore[assignment]
+            assert container.discover_cycle is not None
+            assert container.record_result_cycle is not None
+            assert container.recompute_cycle is not None
+            tasks = create_scheduler_tasks(
+                container.discover_cycle,
+                container.record_result_cycle,
+                container.recompute_cycle,
+                settings,
+                stop,
+                monitor=container.health_monitor,
+            )
+            # Discover butuh ~2 dtk (throttle Gamma ≤5 req/s pada 1 aset
+            # x 6 jendela + supplement) — beri waktu ≥1 siklus discover.
+            await asyncio.sleep(3.0)
+            stop.set()
+            await cancel_all(tasks)
+        finally:
+            await container.aclose()
+
+    kinds = {kind for kind, _ok in recorder.calls}
+    assert "discover" in kinds, "record_cycle('discover', ...) harus terpanggil"
+    assert "result" in kinds, "record_cycle('result', ...) harus terpanggil"
+    assert all(ok for _kind, ok in recorder.calls), "siklus mock harus sukses"
+
+
+async def test_heartbeat_ingest_diteruskan_ke_monitor_container(
+    engine: AsyncEngine,
+) -> None:
+    """T-027: on_heartbeat IngestTrades lewat container → record_cycle("ingest").
+
+    Heartbeat ingest (bukan trade LIVE) adalah dasar kesegaran ingest
+    (ADR-014) — test membuktikan container meneruskannya ke monitor.
+    """
+    settings = Settings.model_validate({**_TEST_ENV, "MARKET_ASSETS": ("btc",)})
+    container = Container.build(settings)
+
+    class _RecordingMonitor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, bool]] = []
+
+        async def record_cycle(self, kind: str, ok: bool) -> None:
+            self.calls.append((kind, ok))
+
+    recorder = _RecordingMonitor()
+    container.health_monitor = recorder  # type: ignore[assignment]
+    try:
+        await container._report_ingest_heartbeat(True)
+        await container._report_ingest_heartbeat(False)
+    finally:
+        await container.aclose()
+
+    assert recorder.calls == [("ingest", True), ("ingest", False)]

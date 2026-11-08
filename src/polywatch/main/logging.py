@@ -75,7 +75,11 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging(level: str = "INFO") -> None:
-    """Pasang handler JSON ke root logger (idempoten)."""
+    """Pasang handler JSON ke root logger (idempoten).
+
+    T-027: httpx/httpcore di-redam ke WARNING — tiap request Gamma/RPC
+    ditulis INFO oleh library dan membanjiri journald.
+    """
     root = logging.getLogger()
     root.setLevel(level)
     for handler in list(root.handlers):
@@ -83,3 +87,5 @@ def configure_logging(level: str = "INFO") -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
     root.addHandler(handler)
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)

@@ -66,6 +66,11 @@ SELL = 1
 
 OnSavedCallback = Callable[[Sequence[Trade]], Awaitable[None]]
 
+#: Callback heartbeat ingest (T-027/ADR-014): dipanggil setiap kali ingest
+#: benar-benar bekerja (batch commit tersimpan / siklus WS aktif) — dasar
+#: kesegaran ingest di HealthMonitor, bukan trade market LIVE.
+OnHeartbeatCallback = Callable[[bool], Awaitable[None]]
+
 DEFAULT_MAX_CACHE_TX = 10_000
 
 #: Interval refresh token market live untuk stream kontinyu (T-026).
@@ -101,6 +106,7 @@ class IngestTrades:
         live_refresh_sec: float = DEFAULT_LIVE_REFRESH_SEC,
         sleep: Callable[[float], Awaitable[None]] | None = None,
         on_batch_commit: Callable[[], Awaitable[None]] | None = None,
+        on_heartbeat: OnHeartbeatCallback | None = None,
     ) -> None:
         self._stream = stream
         self._receipts = receipts
@@ -115,7 +121,35 @@ class IngestTrades:
         self._live_refresh_sec = live_refresh_sec
         self._sleep = sleep or asyncio.sleep
         self._on_batch_commit = on_batch_commit
+        self._on_heartbeat = on_heartbeat
         self._seen_tx: set[str] = set()
+        self._last_event_beat = 0.0
+
+    async def _heartbeat(self, ok: bool = True) -> None:
+        """Laporkan aktivitas ingest ke health monitor (T-027).
+
+        Gagal melapor tidak boleh mengganggu loop ingest.
+        """
+        if self._on_heartbeat is None:
+            return
+        try:
+            await self._on_heartbeat(ok)
+        except Exception:
+            logger.exception(
+                "laporan heartbeat ingest gagal", extra={"event": "ingest_heartbeat_error"}
+            )
+
+    async def _heartbeat_event(self) -> None:
+        """Heartbeat ringan per event WS — throttle internal 60 dtk.
+
+        Stream hidup berjam-jam; event WS (apa pun isinya) bukti siklus
+        aktif, tetapi tidak perlu melapor ribuan kali per menit.
+        """
+        now = self._clock.now().timestamp()
+        if now - self._last_event_beat < 60.0:
+            return
+        self._last_event_beat = now
+        await self._heartbeat(ok=True)
 
     async def run(self, stop_event: asyncio.Event | None = None) -> None:
         """Loop ingest kontinyu (T-026): langganan WS hidup seumur proses.
@@ -154,9 +188,16 @@ class IngestTrades:
                     extra={"tokens": len(token_map), "markets": len(current)},
                 )
                 stats = IngestStats()
+                # Heartbeat: langganan WS aktif dimulai (T-027/ADR-014) —
+                # stream kontinyu bisa hidup berjam-jam tanpa pernah
+                # "berakhir", jadi siklus-hidup itu sendiri adalah aktivitas.
+                await self._heartbeat(ok=True)
                 try:
                     async for event in self._stream.stream(list(token_map)):
                         stats.events_seen += 1
+                        # Heartbeat per event WS diterima (rate-limited
+                        # internal supaya tidak membanjiri monitor).
+                        await self._heartbeat_event()
                         if event.tx_hash in self._seen_tx:
                             stats.tx_deduped += 1
                             continue
@@ -171,7 +212,10 @@ class IngestTrades:
                         "stream ingest gagal; restart dengan token terbaru",
                         extra={"event": "ingest_stream_error"},
                     )
+                    await self._heartbeat(ok=False)
                 _log_cycle(stats)
+                # Heartbeat: siklus WS selesai dengan sehat (T-027/ADR-014).
+                await self._heartbeat(ok=True)
                 if stats.trades_saved > 0:
                     logger.info(
                         "batch trade tersimpan",

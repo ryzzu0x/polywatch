@@ -505,3 +505,74 @@ async def test_run_loop_commit_per_batch() -> None:
     # run() dengan token statis (tanpa live_tokens) — satu siklus lalu stop
     await asyncio.gather(ingest.run(stop), _stop_after_first())
     assert commits == [1]  # batch tersimpan → commit langsung, bukan di akhir
+
+
+async def test_run_loop_melaporkan_heartbeat_siklus_sehat() -> None:
+    """T-027/ADR-014: setiap siklus WS aktif melaporkan heartbeat ingest."""
+    stream = RestartableFakeStream([_event("0xtx1")])
+    fills = {"0xtx1": [_fill("0xtx1", WALLET_A, WALLET_B, side=0, token_id=111)]}
+    live = FakeLiveTokens([[MARKET], [MARKET], [MARKET]])
+    stop = asyncio.Event()
+    heartbeats: list[bool] = []
+
+    async def on_heartbeat(ok: bool) -> None:
+        heartbeats.append(ok)
+
+    ingest = IngestTrades(
+        stream=stream,
+        receipts=FakeReceipts(fills),
+        trades=FakeTradeRepository(),
+        markets=FakeMarketRepository({7: MARKET}),
+        clock=FakeClock(),
+        live_tokens=live,
+        live_refresh_sec=0.01,
+        sleep=_sleep_noop,
+        on_heartbeat=on_heartbeat,
+    )
+
+    async def _stop_after_three_cycles() -> None:
+        for _ in range(500):
+            if len(stream.stream_calls) >= 3:
+                break
+            await asyncio.sleep(0.001)
+        stop.set()
+
+    await asyncio.gather(ingest.run(stop), _stop_after_three_cycles())
+
+    # ≥1 heartbeat sukses per siklus stream (3 siklus).
+    assert len(heartbeats) >= 3
+    assert heartbeats.count(True) >= 3
+
+
+async def test_run_loop_heartbeat_gagal_tidak_mengganggu_ingest() -> None:
+    """Callback heartbeat yang melempar tidak boleh mematikan loop ingest."""
+    stream = RestartableFakeStream([_event("0xtx1")])
+    fills = {"0xtx1": [_fill("0xtx1", WALLET_A, WALLET_B, side=0, token_id=111)]}
+    live = FakeLiveTokens([[MARKET], [MARKET], [MARKET]])
+    stop = asyncio.Event()
+
+    async def broken_heartbeat(ok: bool) -> None:
+        raise RuntimeError("monitor down")
+
+    ingest = IngestTrades(
+        stream=stream,
+        receipts=FakeReceipts(fills),
+        trades=FakeTradeRepository(),
+        markets=FakeMarketRepository({7: MARKET}),
+        clock=FakeClock(),
+        live_tokens=live,
+        live_refresh_sec=0.01,
+        sleep=_sleep_noop,
+        on_heartbeat=broken_heartbeat,
+    )
+
+    async def _stop_after_three_cycles() -> None:
+        for _ in range(500):
+            if len(stream.stream_calls) >= 3:
+                break
+            await asyncio.sleep(0.001)
+        stop.set()
+
+    await asyncio.gather(ingest.run(stop), _stop_after_three_cycles())
+
+    assert len(stream.stream_calls) == 3  # loop tetap hidup walau laporan gagal

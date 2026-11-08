@@ -2,8 +2,20 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _default_lock_file() -> str:
+    return str(Path(tempfile.gettempdir()) / "polywatch.lock")
+
+
+def _default_health_state_file() -> str:
+    return str(Path(tempfile.gettempdir()) / "polywatch-health-state.json")
+
 
 _ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
@@ -28,12 +40,24 @@ class Settings(BaseSettings):
     result_interval_s: float = Field(default=30.0, alias="RESULT_INTERVAL_S")
     heartbeat_interval_s: float = Field(default=60.0, alias="HEARTBEAT_INTERVAL_S")
 
-    #: Health monitor (T-019): ambang basi, rate limit notifikasi, grace period.
-    stale_ingest_s: float = Field(default=120.0, alias="STALE_INGEST_S")
+    #: Health monitor (T-019/T-027): ambang basi, rate limit, grace period.
+    #: T-027: kesegaran ingest diukur dari HEARTBEAT ingest (batch commit /
+    #: siklus WS aktif), bukan trade market LIVE — ambang dinaikkan ke 600 dtk.
+    stale_ingest_s: float = Field(default=600.0, alias="STALE_INGEST_S")
     stale_discover_s: float = Field(default=180.0, alias="STALE_DISCOVER_S")
     health_rate_limit_s: float = Field(default=600.0, alias="HEALTH_RATE_LIMIT_S")
     health_grace_s: float = Field(default=300.0, alias="HEALTH_GRACE_S")
     health_check_interval_s: float = Field(default=30.0, alias="HEALTH_CHECK_INTERVAL_S")
+
+    #: State notifikasi health persisten antar-restart (T-027, ADR-014):
+    #: file JSON kecil — restart berulang tidak memicu spam alarm.
+    health_state_file: str = Field(
+        default_factory=_default_health_state_file, alias="HEALTH_STATE_FILE"
+    )
+
+    #: Single-instance lock (T-027, ADR-014): flock eksklusif — dua proses
+    #: bersamaan menyebabkan alert ganda + TelegramConflictError.
+    lock_file: str = Field(default_factory=_default_lock_file, alias="LOCK_FILE")
 
     #: Aset default discovery market (T-024) — dipakai discover_markets.
     market_assets: tuple[str, ...] = Field(

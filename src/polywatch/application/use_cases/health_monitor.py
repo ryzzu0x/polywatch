@@ -1,21 +1,32 @@
-"""Use case health_monitor: deteksi aktivitas basi + notifikasi owner (T-019).
+"""Use case health_monitor: deteksi aktivitas basi + notifikasi owner (T-019, T-027).
 
 Kesegaran tiga komponen diperiksa setiap `check()` (dipanggil dari runner,
 default tiap `HEALTH_CHECK_INTERVAL_S` = 30 dtk):
 
-- `ingest` — trade terakhir pada market LIVE (port `HealthActivityRepository`);
+- `ingest` — **heartbeat ingest** (ADR-014): `record_cycle("ingest", ok)`
+  dipanggil oleh `IngestTrades` setiap kali ia benar-benar bekerja (batch
+  commit tersimpan / siklus WS aktif), BUKAN trade market LIVE — jendela
+  5m baru atau pasar sepi tidak lagi memicu alarm palsu. Ambang default
+  `STALE_INGEST_S` = 600 dtk.
 - `discover` / `result` — siklus scheduler terakhir yang berhasil, dilaporkan
   lewat `record_cycle` dari loop scheduler.
 
-Ambang default `STALE_INGEST_S` = 120 dtk dan `STALE_DISCOVER_S` = 180 dtk.
-Komponen basi memicu satu notifikasi owner via port `Notifier`, maksimal satu
-per jenis per `rate_limit_s` (default 600 dtk / 10 menit) supaya tidak spam
-saat gangguan berjam-jam; komponen yang aktif kembali memicu satu notifikasi
-pemulihan.
+T-027 — alarm ingest hanya relevan bila ada market LIVE (`live_market_count`
+dari port `HealthActivityRepository`): tanpa market live, tidak ada alarm.
+`last_trade_at_live` tetap dibaca sebagai informasi tambahan di pesan alarm
+dan `/status`, bukan pemicu.
 
-Seluruh state disimpan in-memory (ADR-008): cukup untuk MVP. Batasannya,
-restart proses mereset grace period dan status notifikasi, sehingga saat
-gangguan masih berlangsung notifikasi bisa terkirim ulang setelah restart.
+Komponen basi memicu satu notifikasi owner via port `Notifier`, maksimal
+satu per jenis per `rate_limit_s` (default 600 dtk / 10 menit) supaya
+tidak spam saat gangguan berjam-jam; komponen yang aktif kembali memicu
+satu notifikasi pemulihan.
+
+Grace period setelah start (default 300 dtk): tanpa data sama sekali,
+jangan langsung alarm — berlaku juga untuk heartbeat ingest.
+
+T-027 — idempoten antar-restart: state terakhir notifikasi disimpan ke
+store persisten (`NotificationStore`, file JSON default — ADR-014) supaya
+restart berulang tidak mengirim ulang alarm yang sama.
 """
 
 from __future__ import annotations
@@ -23,7 +34,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Protocol
 
 from polywatch.application.ports import (
     Clock,
@@ -33,15 +44,23 @@ from polywatch.application.ports import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_STALE_INGEST_SEC = 120.0
+DEFAULT_STALE_INGEST_SEC = 600.0
 DEFAULT_STALE_DISCOVER_SEC = 180.0
 DEFAULT_RATE_LIMIT_SEC = 600.0
 #: Grace period setelah start: tanpa data sama sekali, jangan langsung alarm.
 DEFAULT_GRACE_SEC = 300.0
 
-CycleKind = Literal["discover", "result"]
+CycleKind = Literal["ingest", "discover", "result"]
 
 _COMPONENTS: tuple[str, ...] = ("ingest", "discover", "result")
+
+
+class NotificationStore(Protocol):
+    """Port state notifikasi persisten antar-restart (ADR-014)."""
+
+    def load(self) -> dict[str, tuple[datetime | None, str | None]]: ...
+
+    def save(self, records: dict[str, tuple[datetime | None, str | None]]) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +86,7 @@ class HealthReport:
 
 @dataclass(slots=True)
 class _State:
-    """State in-memory satu komponen (bukan tabel — lihat ADR-008)."""
+    """State in-memory satu komponen (synced dengan store persisten T-027)."""
 
     last_ok: datetime | None = None
     stale: bool = False
@@ -79,14 +98,22 @@ def _fmt(moment: datetime | None) -> str:
     return moment.isoformat(timespec="seconds") if moment is not None else "belum ada"
 
 
+def _stale_text_ingest(stale_sec: float, last: datetime | None, live_markets: int | None) -> str:
+    menit = max(int(stale_sec // 60), 1)
+    live_txt = f", market live: {live_markets}" if live_markets is not None else ""
+    return (
+        f"⚠️ polywatch: tidak ada heartbeat ingest lebih dari {menit} menit "
+        f"(batch terakhir: {_fmt(last)}{live_txt})."
+    )
+
+
 def _stale_text(name: str, stale_sec: float, last: datetime | None) -> str:
     menit = max(int(stale_sec // 60), 1)
     label = {
-        "ingest": f"tidak ada trade baru dari market LIVE lebih dari {menit} menit",
         "discover": f"siklus discover tidak berhasil lebih dari {menit} menit",
         "result": f"siklus result tidak berhasil lebih dari {menit} menit",
-    }[name]
-    return f"⚠️ polywatch: {label} (aktivitas terakhir: {_fmt(last)})."
+    }
+    return f"⚠️ polywatch: {label[name]} (aktivitas terakhir: {_fmt(last)})."
 
 
 def _recovery_text(name: str, last: datetime | None) -> str:
@@ -94,7 +121,7 @@ def _recovery_text(name: str, last: datetime | None) -> str:
 
 
 class HealthMonitor:
-    """Pantau kesegaran ingest & siklus scheduler, notifikasi owner (T-019)."""
+    """Pantau kesegaran ingest & siklus scheduler, notifikasi owner (T-019/T-027)."""
 
     def __init__(
         self,
@@ -106,6 +133,7 @@ class HealthMonitor:
         stale_discover_s: float = DEFAULT_STALE_DISCOVER_SEC,
         rate_limit_s: float = DEFAULT_RATE_LIMIT_SEC,
         grace_s: float = DEFAULT_GRACE_SEC,
+        state_store: NotificationStore | None = None,
     ) -> None:
         self._activity = activity
         self._notifier = notifier
@@ -114,14 +142,69 @@ class HealthMonitor:
         self._stale_discover_s = max(stale_discover_s, 0.0)
         self._rate_limit_s = max(rate_limit_s, 0.0)
         self._grace_s = max(grace_s, 0.0)
+        self._state_store = state_store
         self._started_at = clock.now()
         self._state: dict[str, _State] = {name: _State() for name in _COMPONENTS}
+        self._restore_notification_state()
+
+    def _restore_notification_state(self) -> None:
+        """Muat `last_notified_at`/`notified` dari store persisten (T-027).
+
+        Restart saat gangguan masih berlangsung tidak boleh langsung
+        mengirim ulang alarm — cooldown dihitung dari waktu kirim terakhir
+        yang tersimpan di disk.
+        """
+        if self._state_store is None:
+            return
+        try:
+            records = self._state_store.load()
+        except Exception:
+            logger.exception(
+                "gagal memuat state notifikasi; lanjut tanpa idempotensi restart",
+                extra={"event": "health_state_load_error"},
+            )
+            return
+        now = self._clock.now()
+        for name in _COMPONENTS:
+            record = records.get(f"health:{name}")
+            if record is None:
+                continue
+            last_sent_at, state = record
+            self._state[name].last_notified_at = last_sent_at
+            if (
+                state == "stale"
+                and last_sent_at is not None
+                and (now - last_sent_at).total_seconds() < self._rate_limit_s
+            ):
+                # masih dalam cooldown antar-restart → tandai sudah dinotifikasi
+                self._state[name].notified = True
+                self._state[name].stale = True
+
+    def _persist_notification_state(self, name: str) -> None:
+        """Simpan state notifikasi satu komponen ke store persisten."""
+        if self._state_store is None:
+            return
+        try:
+            records = self._state_store.load()
+        except Exception:
+            records = {}
+        state = self._state[name]
+        records[f"health:{name}"] = (
+            state.last_notified_at,
+            "stale" if state.notified else "ok",
+        )
+        try:
+            self._state_store.save(records)
+        except Exception:
+            # save() sudah me-log kegagalan internalnya di adapter
+            logger.debug("state notifikasi tidak tersimpan", extra={"component": name})
 
     async def record_cycle(self, kind: CycleKind, ok: bool) -> None:
-        """Catat hasil siklus scheduler; hanya sukses dihitung sebagai aktivitas.
+        """Catat hasil siklus/heartbeat; hanya sukses dihitung sebagai aktivitas.
 
-        Siklus gagal tidak meng-update `last_ok` — penilaian stale (dan
-        notifikasinya) tetap lewat `check()` berdasarkan ambang waktu.
+        `kind="ingest"` dipakai untuk heartbeat ingest (batch commit /
+        siklus WS aktif, ADR-014). Keberhasilan meng-update `last_ok`;
+        kegagalan tidak — penilaian stale tetap lewat `check()`.
         """
         state = self._state[kind]
         if not ok:
@@ -134,24 +217,47 @@ class HealthMonitor:
         state.last_notified_at = None
         if was_notified:
             await self._send(_recovery_text(kind, now), "health_recovered")
+        self._persist_notification_state(kind)
 
     async def check(self) -> HealthReport:
         """Periksa ketiga komponen; kirim notifikasi bila perlu (rate limited)."""
         now = self._clock.now()
-        last_trade = await self._activity.last_trade_at_live()
+        live_markets: int | None = None
+        try:
+            live_markets = await self._activity.live_market_count()
+        except Exception:
+            logger.exception(
+                "bacaan aktivitas health gagal", extra={"event": "health_activity_error"}
+            )
         report: list[ComponentHealth] = []
         for name in _COMPONENTS:
-            if name == "ingest":
-                last, stale_sec = last_trade, self._stale_ingest_s
-            else:
-                last, stale_sec = self._state[name].last_ok, self._stale_discover_s
-            await self._evaluate(name, last, stale_sec, now)
+            last, stale_sec = (
+                self._state[name].last_ok,
+                (self._stale_ingest_s if name == "ingest" else self._stale_discover_s),
+            )
+            if name == "ingest" and live_markets == 0:
+                # T-027: tanpa market LIVE tidak ada yang bisa di-ingest —
+                # jangan alarm; heartbeat tetap dicatat.
+                state = self._state[name]
+                if state.notified:
+                    await self._send(_recovery_text(name, last or now), "health_recovered")
+                state.stale = False
+                state.notified = False
+                state.last_notified_at = None
+                report.append(ComponentHealth(name, False, False, last))
+                continue
+            await self._evaluate(name, last, stale_sec, now, live_markets)
             state = self._state[name]
             report.append(ComponentHealth(name, state.stale, state.notified, last))
         return HealthReport(tuple(report))
 
     async def _evaluate(
-        self, name: str, last: datetime | None, stale_sec: float, now: datetime
+        self,
+        name: str,
+        last: datetime | None,
+        stale_sec: float,
+        now: datetime,
+        live_markets: int | None = None,
     ) -> None:
         state = self._state[name]
         if last is None:
@@ -176,9 +282,14 @@ class HealthMonitor:
             or (now - state.last_notified_at).total_seconds() >= self._rate_limit_s
         )
         if cooldown_ok:
-            await self._send(_stale_text(name, stale_sec, last), "health_stale")
+            if name == "ingest":
+                text = _stale_text_ingest(stale_sec, last, live_markets)
+            else:
+                text = _stale_text(name, stale_sec, last)
+            await self._send(text, "health_stale")
             state.notified = True
             state.last_notified_at = now
+        self._persist_notification_state(name)
 
     async def _send(self, text: str, event: str) -> None:
         """Kirim lewat port Notifier; kegagalan kirim tidak boleh melempar."""
@@ -197,4 +308,5 @@ __all__ = [
     "CycleKind",
     "HealthMonitor",
     "HealthReport",
+    "NotificationStore",
 ]

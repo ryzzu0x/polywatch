@@ -58,6 +58,9 @@ class FakeHealthMonitor(HealthMonitor):
 class _NoopActivity:
     """Repository aktivitas no-op untuk monitor palsu."""
 
+    async def live_market_count(self) -> int:
+        return 0
+
     async def last_trade_at_live(self) -> datetime | None:
         return None
 

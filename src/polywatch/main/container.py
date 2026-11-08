@@ -255,11 +255,15 @@ class Container:
     # ------------------------------------------------------------------ health
 
     def setup_health(self) -> None:
-        """Rakit HealthMonitor (T-019): bacaan aktivitas + notifier owner.
+        """Rakit HealthMonitor (T-019/T-027): heartbeat ingest + notifier owner.
 
-        State kesehatan in-memory (ADR-008) — tidak ada tabel baru. Notifikasi
-        keluar tetap lewat port `Notifier` (TelegramNotifier), bukan aiogram
-        langsung dari use case.
+        T-027 (ADR-014): kesegaran ingest berbasis heartbeat (dilaporkan
+        `IngestTrades` via `record_cycle("ingest", ok)`), alarm ingest hanya
+        bila ada market LIVE; state notifikasi persisten antar-restart via
+        file JSON (`HEALTH_STATE_FILE`); ambang default 600 dtk.
+
+        Notifikasi keluar tetap lewat port `Notifier` (TelegramNotifier),
+        bukan aiogram langsung dari use case.
 
         T-023: repository aktivitas dibuat per-cek (session per-task) —
         tidak ada session bersama dengan handler bot.
@@ -269,12 +273,20 @@ class Container:
             SqlAlchemyTradeRepository,
         )
         from polywatch.infrastructure.telegram_notifier import TelegramNotifier
+        from polywatch.main.health_state import JsonHealthStateStore
 
         def activity_repo() -> Any:
             return SqlAlchemyTradeRepository(self.scoped_session())
 
         class _ScopedActivity:
             """Adapter kecil: tiap cek ambil session per-task lalu remove."""
+
+            async def live_market_count(inner_self) -> int:
+                try:
+                    repo = activity_repo()
+                    return int(await repo.live_market_count())
+                finally:
+                    await self.release_session()
 
             async def last_trade_at_live(inner_self) -> Any:
                 try:
@@ -295,10 +307,16 @@ class Container:
             stale_discover_s=self.settings.stale_discover_s,
             rate_limit_s=self.settings.health_rate_limit_s,
             grace_s=self.settings.health_grace_s,
+            state_store=JsonHealthStateStore(self.settings.health_state_file),
         )
         logger.info(
             "health monitor dirakit",
-            extra={"event": "container_health_setup", "version": __version__},
+            extra={
+                "event": "container_health_setup",
+                "version": __version__,
+                "stale_ingest_s": self.settings.stale_ingest_s,
+                "health_state_file": self.settings.health_state_file,
+            },
         )
 
     @classmethod
@@ -474,6 +492,19 @@ class Container:
 
     # ------------------------------------------------------------------ ingest
 
+    async def _report_ingest_heartbeat(self, ok: bool) -> None:
+        """Teruskan heartbeat ingest ke health monitor (T-027, ADR-014).
+
+        Dipasang sebagai `on_heartbeat` IngestTrades: setiap siklus WS
+        aktif / batch commit melaporkan aktivitas — kesegaran ingest tidak
+        lagi bergantung pada ada/tidaknya trade market LIVE. Monitor belum
+        dirakit → no-op.
+        """
+        monitor = self.health_monitor
+        if monitor is None:
+            return
+        await monitor.record_cycle("ingest", ok)
+
     def setup_ingest(self) -> None:
         """Rakit IngestTrades kontinyu dengan hook on_saved → evaluate_alert (T-017/T-026).
 
@@ -597,6 +628,7 @@ class Container:
                     live_tokens=_ScopedLiveTokens(),
                     on_saved=on_saved,
                     on_batch_commit=self._session_commit,
+                    on_heartbeat=self._report_ingest_heartbeat,
                 )
                 logger.info(
                     "loop ingest kontinyu dimulai",

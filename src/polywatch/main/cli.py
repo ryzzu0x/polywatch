@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from polywatch import __version__
 from polywatch.main.config import Settings
 from polywatch.main.container import Container
+from polywatch.main.instance_lock import InstanceLock, InstanceLockError
 from polywatch.main.logging import configure_logging
 from polywatch.main.runner import run
 
@@ -53,6 +54,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     configure_logging(settings.log_level)
+    lock = InstanceLock(settings.lock_file)
+    try:
+        lock.acquire()
+    except InstanceLockError:
+        # Instance lain berjalan — keluar tanpa menyentuh Telegram/DB.
+        return 3
     container = Container.build(settings)
     logger.info(
         "polywatch start",
@@ -65,9 +72,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.check:
         sys.stdout.write("konfigurasi valid\n")
+        lock.release()
         return 0
     heartbeat = _heartbeat_interval(args, settings)
-    asyncio.run(_run_with_bot(container, heartbeat_interval_sec=heartbeat))
+    try:
+        asyncio.run(_run_with_bot(container, heartbeat_interval_sec=heartbeat))
+    finally:
+        lock.release()
     return 0
 
 
@@ -83,22 +94,20 @@ async def _run_with_bot(container: Container, heartbeat_interval_sec: float) -> 
             "bot gagal dirakit; runner jalan tanpa bot", extra={"event": "bot_setup_failed"}
         )
     try:
+        # T-027: health monitor dirakit LEBIH DULU — scheduler dan ingest
+        # melaporkan record_cycle/heartbeat ke objek yang sudah ada
+        # (sebelumnya setup_scheduler duluan → monitor=None → record_cycle
+        # tidak pernah dipanggil → alarm palsu "belum ada aktivitas").
+        container.setup_health()
         container.setup_scheduler()
         container.setup_ingest()
     except Exception:
-        # Scheduler/ingest gagal dirakit tidak boleh menghentikan service;
-        # siklus yang gagal dilaporkan ke health monitor bila terpasang.
+        # Health/scheduler/ingest gagal dirakit tidak boleh menghentikan
+        # service; siklus yang gagal dilaporkan ke health monitor bila
+        # terpasang.
         logger.exception(
-            "scheduler/ingest gagal dirakit; runner jalan tanpa siklus",
+            "health/scheduler/ingest gagal dirakit; runner jalan tanpa siklus",
             extra={"event": "scheduler_setup_failed"},
-        )
-    try:
-        container.setup_health()
-    except Exception:
-        # Health monitor gagal dirakit (mis. jaringan) tidak menghentikan service.
-        logger.exception(
-            "health monitor gagal dirakit; runner jalan tanpa notifikasi kesehatan",
-            extra={"event": "health_setup_failed"},
         )
     await run(container, heartbeat_interval_sec=heartbeat_interval_sec)
 
