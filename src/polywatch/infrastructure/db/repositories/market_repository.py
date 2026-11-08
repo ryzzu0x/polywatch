@@ -16,7 +16,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
-from polywatch.application.dto.market import PendingMarket
+from polywatch.application.dto.market import PendingMarket, TokenMarketInfo
 from polywatch.domain.errors import InvalidMarketSlugError
 from polywatch.domain.market import (
     Market,
@@ -156,6 +156,20 @@ class SqlAlchemyMarketRepository:
     async def has_result(self, market_id: int) -> bool:
         stmt = select(exists().where(MarketResultModel.market_id == market_id))
         return bool(await self._session.scalar(stmt))
+
+    async def get_token_market(self, market_id: int) -> TokenMarketInfo | None:
+        """Token Up/Down + condition id market (untuk ingest/backfill T-011)."""
+        stmt = select(MarketModel).where(MarketModel.id == market_id)
+        row = await self._session.scalar(stmt)
+        if row is None:
+            return None
+        return TokenMarketInfo(
+            market_id=row.id,
+            condition_id=row.condition_id,
+            token_up=row.token_up,
+            token_down=row.token_down,
+            slug=row.slug,
+        )
 
     async def list_pending_resolution(self, limit: int) -> Sequence[PendingMarket]:
         """Market CLOSED yang belum punya market_results (urut end_at lama dulu)."""

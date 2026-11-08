@@ -11,7 +11,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polywatch.application.dto.trade import ResolvedTrade
@@ -20,16 +21,53 @@ from polywatch.infrastructure.db.models import MarketResultModel, TradeModel
 
 
 class SqlAlchemyTradeRepository:
-    """Repository trade (bagian baca) dengan session yang dikelola pemanggil."""
+    """Repository trade (baca + tulis idempoten) dengan session dikelola pemanggil."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     async def insert_many(self, trades: Sequence[Trade]) -> int:
-        raise NotImplementedError("scope T-011 ingest_trades; belum diimplementasikan")
+        """Sisipkan batch idempoten; kembalikan jumlah baris baru.
+
+        `ON CONFLICT (tx_hash, log_index, wallet) DO NOTHING` — menjalankan
+        ingest ulang (reconnect WS, backfill, replay) tidak menduplikasi.
+        Baris duplikat dalam satu batch disatukan lebih dulu ( statement
+        tunggal dengan same conflict key akan error tanpa dedupe).
+        """
+        unique: dict[tuple[str, int, str], Trade] = {}
+        for trade in trades:
+            unique[(trade.tx_hash, trade.log_index, trade.wallet)] = trade
+        if not unique:
+            return 0
+        stmt = (
+            pg_insert(TradeModel)
+            .values(
+                [
+                    {
+                        "tx_hash": t.tx_hash,
+                        "log_index": t.log_index,
+                        "market_id": t.market_id,
+                        "wallet": t.wallet,
+                        "outcome": t.outcome,
+                        "action": t.action,
+                        "price": t.price,
+                        "size": t.size,
+                        "usdc": t.usdc,
+                        "traded_at": t.traded_at,
+                    }
+                    for t in unique.values()
+                ]
+            )
+            .on_conflict_do_nothing(constraint="uq_trades_idempotent")
+            .returning(TradeModel.id)
+        )
+        result = await self._session.execute(stmt)
+        return len(result.scalars().all())
 
     async def last_traded_at(self, market_id: int) -> datetime | None:
-        raise NotImplementedError("scope T-011 ingest_trades; belum diimplementasikan")
+        """Waktu trade terakhir market (untuk backfill sejak terakhir)."""
+        stmt = select(func.max(TradeModel.traded_at)).where(TradeModel.market_id == market_id)
+        return await self._session.scalar(stmt)
 
     async def wallets_for_market(self, market_id: int) -> Sequence[str]:
         """Wallet unik yang pernah trade di market ini (urut)."""

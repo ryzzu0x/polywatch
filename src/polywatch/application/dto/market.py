@@ -48,3 +48,14 @@ class PendingMarket:
     condition_id: str
     slug: str
     status: MarketStatus
+
+
+@dataclass(frozen=True, slots=True)
+class TokenMarketInfo:
+    """Identitas market yang dibutuhkan ingest trade (T-011)."""
+
+    market_id: int
+    condition_id: str
+    token_up: str
+    token_down: str
+    slug: str

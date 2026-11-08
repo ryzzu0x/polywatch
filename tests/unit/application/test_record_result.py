@@ -15,6 +15,7 @@ from polywatch.application.dto.market import (
     MarketResultSnapshot,
     MarketSnapshot,
     PendingMarket,
+    TokenMarketInfo,
 )
 from polywatch.application.use_cases.record_result import RecordResult
 from polywatch.domain.market import (
@@ -74,6 +75,9 @@ class FakeRepository:
 
     async def list_pending_resolution(self, limit: int) -> Sequence[PendingMarket]:
         return []
+
+    async def get_token_market(self, market_id: int) -> TokenMarketInfo | None:
+        return None
 
     async def has_result(self, market_id: int) -> bool:
         return market_id in self.results

@@ -32,10 +32,11 @@ PUBLIC_RPC = [
 ]
 # Temuan empiris (T-005c): market updown live semuanya via CTF Exchange V2.
 EXCHANGE_V2 = "0xe111180000d2663c0091e4f400237545b87b996b"
-# keccak("OrderFilled(bytes32,address,address,uint8,uint256,uint256,uint256,uint256,bytes32,bytes32)")
+# keccak OrderFilled(bytes32,address,address,uint8,uint256,uint256,uint256,uint256,bytes32,bytes32)
 ORDER_FILLED_TOPIC = "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee"
 UA = "polywatch-spike-t005c/0.1"
-# OrderFilled V2 non-indexed: side, tokenId, makerAmountFilled, takerAmountFilled, fee, builder, metadata
+# OrderFilled V2 non-indexed: side, tokenId, makerAmountFilled, takerAmountFilled,
+# fee, builder, metadata
 OF_TYPES = ["uint8", "uint256", "uint256", "uint256", "uint256", "bytes32", "bytes32"]
 # 6 desimal (USDC & outcome token Polymarket).
 DECIMALS = 10**6
@@ -95,7 +96,11 @@ async def find_live_updown(n: int) -> list[dict[str, Any]]:
                 if not isinstance(tokens, list) or len(tokens) != 2:
                     continue
                 out.append(
-                    {"slug": m["slug"], "cid": m.get("conditionId"), "tokens": [str(t) for t in tokens]}
+                    {
+                        "slug": m["slug"],
+                        "cid": m.get("conditionId"),
+                        "tokens": [str(t) for t in tokens],
+                    }
                 )
                 if len(out) >= n:
                     return out
@@ -129,14 +134,16 @@ async def measure_rpc_latency(samples: int = 20) -> dict[str, Any]:
                     )
                     r.json()["result"]["logs"]
                     lat.append((time.perf_counter() - t0) * 1000)
-                except Exception as e:  # noqa: BLE001 - probe mencatat error apa adanya
+                except Exception as e:
                     err = repr(e)[:120]
                     break
             if lat:
                 results[label] = {
                     "n": len(lat),
                     "median_ms": round(statistics.median(lat), 1),
-                    "p90_ms": round(statistics.quantiles(lat, n=10)[8], 1) if len(lat) >= 10 else None,
+                    "p90_ms": round(statistics.quantiles(lat, n=10)[8], 1)
+                    if len(lat) >= 10
+                    else None,
                     "max_ms": round(max(lat), 1),
                     "error": err,
                 }
@@ -191,7 +198,12 @@ async def main() -> None:
             attempts += 1
             r = await rpc_client.post(
                 rpc,
-                json={"jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionReceipt", "params": [tx]},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "eth_getTransactionReceipt",
+                    "params": [tx],
+                },
             )
             body = r.json()
             result = body.get("result")
@@ -330,7 +342,9 @@ async def main() -> None:
         "sample_ws_event": trades[0]["ws_event"] if trades else None,
     }
     print(json.dumps(summary, indent=1, default=str))
-    with open("docs/spikes/t005c-run.json", "w") as f:
+    with open(  # noqa: ASYNC230
+        "docs/spikes/t005c-run.json", "w"
+    ) as f:
         json.dump({"summary": summary, "trades": trades}, f, default=str)
 
 

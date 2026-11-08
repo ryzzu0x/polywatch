@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
-from polywatch.application.dto.market import PendingMarket
+from polywatch.application.dto.market import PendingMarket, TokenMarketInfo
 from polywatch.application.dto.settings import WatchEntry
 from polywatch.application.dto.trade import ResolvedTrade
 from polywatch.domain.market import Market, MarketResult, MarketStatus, Timeframe
@@ -28,6 +28,10 @@ class MarketRepository(Protocol):
     async def update_status(self, market_id: int, status: MarketStatus) -> None: ...
 
     async def has_result(self, market_id: int) -> bool: ...
+
+    async def get_token_market(self, market_id: int) -> TokenMarketInfo | None:
+        """Token Up/Down + condition id satu market (untuk ingest/backfill)."""
+        ...
 
     async def list_pending_resolution(self, limit: int) -> Sequence[PendingMarket]:
         """Market CLOSED tanpa market_results, siap diproses record_result."""

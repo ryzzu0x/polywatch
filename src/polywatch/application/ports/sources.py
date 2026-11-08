@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
 from polywatch.application.dto.market import MarketResultSnapshot, MarketSnapshot
-from polywatch.application.dto.trade import TradeSnapshot
+from polywatch.application.dto.trade import FilledOrderSnapshot, TradeEventSnapshot, TradeSnapshot
 from polywatch.domain.market import Timeframe
 
 
@@ -26,6 +26,22 @@ class TradeSource(Protocol):
     async def fetch_trades(
         self, condition_id: str, since: datetime | None = None
     ) -> Sequence[TradeSnapshot]: ...
+
+
+class TradeEventStream(Protocol):
+    """Stream event trade real-time (CLOB WS market channel, T-011)."""
+
+    def stream(self, token_ids: Sequence[str]) -> AsyncIterator[TradeEventSnapshot]:
+        """Yield event `last_trade_price` untuk token yang di-subscribe."""
+        ...
+
+
+class ReceiptFetcher(Protocol):
+    """Fetch + decode receipt on-chain untuk satu tx_hash (RPC Polygon)."""
+
+    async def filled_orders(self, tx_hash: str) -> Sequence[FilledOrderSnapshot] | None:
+        """Daftar fill di tx; None bila receipt belum tersedia (timeout)."""
+        ...
 
 
 class PriceSource(Protocol):
