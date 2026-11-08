@@ -115,9 +115,9 @@ Catatan:
 | Perintah | Fungsi | Auth |
 |---|---|---|
 | `/start` | Daftar & menu (MVP: owner saja) | owner |
-| `/status` | Market aktif, delay ingest, error terakhir | owner |
-| `/markets` | Toggle aset × timeframe yang dipantau | owner |
-| `/results <aset> <5m\|15m> [n]` | Hasil market terakhir | owner |
+| `/status` | Market live terakhir, jumlah market per status, trade 24 jam, status WS/RPC, versi | owner |
+| `/markets` | Daftar aset × timeframe + tombol inline toggle on/off (callback query) | owner |
+| `/results <aset> <5m\|15m> [n]` | Hasil market terakhir (open, close, Up/Down, volume, waktu; n ≤ 20) | owner |
 | `/top [n]` | Wallet skor tertinggi | owner |
 | `/wallet <alamat>` | Statistik wallet | owner |
 | `/watch <alamat>` · `/unwatch <alamat>` | Kelola watchlist | owner |

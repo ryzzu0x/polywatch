@@ -5,6 +5,24 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Added (T-014, T-015)
+- Bot Telegram aiogram 3: middleware guard owner-only (chat selain
+  owner ditolak satu baris generik), `/start`, `/status` (market live
+  terakhir, jumlah market per status, trade 24 jam terakhir, status
+  WS/RPC, versi) lewat use case `bot_status` + port baru
+  `MarketStatsRepository`/`TradeStatsRepository` (interface segregation).
+- `/markets`: daftar aset × timeframe dari `watch_config` + tombol
+  inline toggle (callback → `set_watch_enabled` nilai kebalikan, edit
+  pesan idempoten + konfirmasi singkat).
+- `/results <aset> <5m|15m> [n]`: hasil market terakhir dari
+  `market_results` lewat use case `list_results`; validasi aset/
+  timeframe lewat domain, limit 1–20, pesan ramah saat data kosong.
+- Runner menjalankan long polling bot + heartbeat + hook ingest dalam
+  satu proses; shutdown rapi SIGINT/SIGTERM (semua task dibatalkan,
+  session Bot + engine DB ditutup). `--check` tetap tanpa Telegram.
+- Runtime nyata: `getMe` @polywatchryzzubot sukses, polling aktif,
+  SIGTERM → shutdown bersih. 231 → 254 test hijau.
+
 ### Added (T-005c)
 - Spike `docs/spikes/T-005c-orderfilled-rpc.md` + probe
   `scripts/spike/t005c_orderfilled_probe.py`: bukti decode `OrderFilled`
@@ -140,6 +158,24 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 - `TEST_DATABASE_URL` di `.env.example` (placeholder password).
 
 ## [Unreleased]
+
+### Added (T-014, T-015)
+- Bot Telegram aiogram 3: middleware guard owner-only (chat selain
+  owner ditolak satu baris generik), `/start`, `/status` (market live
+  terakhir, jumlah market per status, trade 24 jam terakhir, status
+  WS/RPC, versi) lewat use case `bot_status` + port baru
+  `MarketStatsRepository`/`TradeStatsRepository` (interface segregation).
+- `/markets`: daftar aset × timeframe dari `watch_config` + tombol
+  inline toggle (callback → `set_watch_enabled` nilai kebalikan, edit
+  pesan idempoten + konfirmasi singkat).
+- `/results <aset> <5m|15m> [n]`: hasil market terakhir dari
+  `market_results` lewat use case `list_results`; validasi aset/
+  timeframe lewat domain, limit 1–20, pesan ramah saat data kosong.
+- Runner menjalankan long polling bot + heartbeat + hook ingest dalam
+  satu proses; shutdown rapi SIGINT/SIGTERM (semua task dibatalkan,
+  session Bot + engine DB ditutup). `--check` tetap tanpa Telegram.
+- Runtime nyata: `getMe` @polywatchryzzubot sukses, polling aktif,
+  SIGTERM → shutdown bersih. 231 → 254 test hijau.
 
 ### Added
 - **T-012** — Domain scoring wallet (ADR-003): `ScoringPolicy` injectable,

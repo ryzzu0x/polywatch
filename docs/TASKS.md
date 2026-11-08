@@ -68,10 +68,10 @@
 
 ## M3 — Bot Telegram & Alert (F5)
 
-- [ ] **T-014 · Bot dasar + guard owner** — S
+- [x] **T-014 · Bot dasar + guard owner** — S
   - aiogram, `/start`, `/status`; chat selain owner ditolak
   - *Selesai jika:* test handler lulus; manual cek di Telegram
-- [ ] **T-015 · Perintah `/markets`, `/results`** — M
+- [x] **T-015 · Perintah `/markets`, `/results`** — M
   - *Selesai jika:* skenario demo langkah 1–2 lulus
 - [ ] **T-016 · Perintah `/top`, `/wallet`, `/watch`, `/unwatch`** — M
   - *Selesai jika:* validasi alamat & output sesuai spesifikasi (test)
@@ -134,3 +134,5 @@
 | 2026-11-08 | T-013 | Selesai | Use case recompute_scores (recompute penuh dari seluruh market resolve, bukan inkremental) + WalletStatsRepository PostgreSQL ON CONFLICT (wallet) idempoten + TradeRepository bagian baca (wallets_for_market, resolved_trades_for_wallet via port baru append-only); integration test polywatch_test verifikasi win_rate/edge/roi/score/is_market_maker + idempoten 2× eksekusi hasil sama; insert_many/last_traded_at = scope T-011 |
 | 2026-11-08 | T-005c | Selesai | Spike OrderFilled: seluruh market updown live via CTF Exchange V2 `0xE111180000d2663C0091e4f400237545B87B996B`; event `OrderFilled(bytes32,address,address,uint8,uint256,uint256,uint256,uint256,bytes32,bytes32)` topic0 `0xd543adfd...`; 39/39 trade ter-decode (maker/taker wallet, tokenId, size, usdc, fee, side) dan cocok event WS; e2e WS→tersimpan median 855 ms / p90 1.683 ms / max 2.128 ms (~190× lebih cepat dari Data API 164 s); temuan penting: event WS datang PRA-KONFIRMASI (receipt null sampai tx masuk blok → poll 250 ms); latensi RPC: Alchemy 7,5 ms, drpc 15,9 ms, publicnode 186 ms, 1rpc 269 ms; laporan `docs/spikes/T-005c-orderfilled-rpc.md` |
 | 2026-11-08 | T-011 | Selesai | Ingest hybrid WS+RPC: `orderbook_ws.py` (subscribe market channel, reconnect+backoff otomatis atas close 1000 "all subscribed assets resolved", heartbeat PING), `polygon_rpc.py` (failover Alchemy→publicnode→1rpc→drpc, poll receipt pra-konfirmasi), `order_filled_decoder.py` (decode manual 7 word statis tanpa lib ABI), `ingest_trades.py` (dedupe tx_hash in-memory, mapping token via token_up/token_down, insert_many idempoten ON CONFLICT (tx_hash,log_index,wallet), hook on_saved untuk T-017, backfill Data API), TradeRepository.insert_many+last_traded_at PostgreSQL, LiveTokenQuery (markets LIVE × watch_config enabled); 36 test baru (231 total): decoder fixture receipt nyata, failover respx, dedupe, integration polywatch_test idempoten 2×; gate hijau (ruff/format/mypy strict 80 file/import-linter 3 kept) |
+| 2026-11-08 | T-014 | Selesai | Bot aiogram 3: middleware guard owner-only (non-owner ditolak satu baris generik), /start (sapaan + daftar perintah), /status (market live terakhir, jumlah per status, trade 24 jam, status WS/RPC, versi) lewat use case BotStatus + port stats baru (interface segregation); runner menjalankan long polling + heartbeat + hook ingest bersamaan, shutdown rapi SIGINT/SIGTERM (semua task dibatalkan, session Bot + engine ditutup); --check tetap tanpa Telegram; runtime nyata: getMe @polywatchryzzubot sukses, polling aktif, SIGTERM shutdown bersih; 10 test baru (241 total) |
+| 2026-11-08 | T-015 | Selesai | /markets (daftar watch_config + tombol inline toggle -> set_watch_enabled kebalikan, edit pesan idempoten + konfirmasi singkat) dan /results (validasi aset/timeframe domain, limit 1-20, error ramah saat kosong) lewat use case ListResults + latest_results; pesan dibatasi 3800 char; test formatter + callback toggle via feed_update (13 test baru, 254 total hijau) |
