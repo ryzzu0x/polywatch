@@ -5,6 +5,34 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Added (T-018)
+- `tests/e2e/test_core_flow.py`: E2E alur inti dengan DB nyata
+  `polywatch_test` + semua sumber palsu (tanpa jaringan) —
+  discover_markets (market live/upcoming + aset auto-detect dari slug),
+  ingest_trades dengan fake WS + fake RPC yang me-decode receipt fixture
+  nyata `docs/spikes` (trade tersimpan idempoten), hook `on_saved` →
+  `evaluate_alert` (notifier palsu menerima tepat 1 pesan karena cooldown,
+  `alerts_sent` tercatat dengan `delay_ms` wajar), `record_result`
+  (market_results + status resolved), `recompute_scores` (wallet_stats
+  benar & idempoten), plus jalur gagal: wallet market maker tidak
+  memicu alert; market belum resolved tidak menghasilkan result palsu.
+  Bersih-bersih sendiri (truncate sebelum & sesudah), auto-skip tanpa
+  `TEST_DATABASE_URL`.
+- `main/scheduler.py`: task periodik asyncio untuk siklus penuh —
+  `discover_loop` (sinkronkan market live) dan `result_loop` (market
+  CLOSED tanpa hasil → `record_result`, market yang baru resolved →
+  `recompute_scores`). Exception satu siklus ditangkap + di-log
+  terstruktur (`scheduler_cycle_error`) tanpa mematikan loop; shutdown
+  rapi lewat `stop_event`/`cancel_all`.
+- `Settings`: field baru `DISCOVER_INTERVAL_S` (default 30),
+  `RESULT_INTERVAL_S` (default 30), `HEARTBEAT_INTERVAL_S` (default 60);
+  CLI `--heartbeat-interval` kembali opsional (default dari settings).
+- `Container.setup_scheduler()`: merakit use case siklus penuh (Gamma
+  market source, harga Polymarket + fallback Binance); runner
+  menjalankan scheduler bersama bot polling + heartbeat + hook ingest —
+  deploy tidak lagi menjalankan "bot kosong". `--check` tetap tidak
+  menjalankan apa pun dan tidak menyentuh Telegram. 291 → 297 test.
+
 ### Added (T-016, T-017)
 - `/top [n]` (default 10, maks 25): wallet skor tertinggi dari
   `wallet_stats` tanpa market maker — skor, edge, ROI, jumlah market,
