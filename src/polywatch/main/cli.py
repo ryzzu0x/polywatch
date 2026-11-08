@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 
@@ -12,6 +13,7 @@ from polywatch import __version__
 from polywatch.main.config import Settings
 from polywatch.main.container import Container
 from polywatch.main.logging import configure_logging
+from polywatch.main.runner import DEFAULT_HEARTBEAT_INTERVAL_SEC, run
 
 logger = logging.getLogger("polywatch")
 
@@ -19,6 +21,12 @@ logger = logging.getLogger("polywatch")
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="polywatch", description="polywatch")
     parser.add_argument("--check", action="store_true", help="validasi konfigurasi lalu keluar")
+    parser.add_argument(
+        "--heartbeat-interval",
+        type=float,
+        default=DEFAULT_HEARTBEAT_INTERVAL_SEC,
+        help="interval heartbeat dalam detik (default: 60)",
+    )
     parser.add_argument("--version", action="version", version=f"polywatch {__version__}")
     return parser.parse_args(argv)
 
@@ -43,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info(
         "polywatch start",
         extra={
+            "event": "app_start",
             "version": __version__,
             "owner_chat_id": container.settings.owner_chat_id,
             "clock": type(container.clock).__name__,
@@ -51,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         sys.stdout.write("konfigurasi valid\n")
         return 0
-    logger.info("fondasi siap; bot Telegram diimplementasikan pada T-014")
+    asyncio.run(run(container, heartbeat_interval_sec=args.heartbeat_interval))
     return 0
 
 

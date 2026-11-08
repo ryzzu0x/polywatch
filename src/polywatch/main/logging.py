@@ -4,8 +4,24 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
+
+from pydantic import SecretStr
+
+_SECRET_KEY_PATTERN = re.compile(r"(token|secret|password|api_?key|dsn)$", re.IGNORECASE)
+_REDACTED = "********"
+
+
+def _redact(key: str, value: Any) -> Any:
+    """Samarkan nilai kunci terindikasi secret (jangan sampai bocor ke log)."""
+    if isinstance(value, SecretStr):
+        return _REDACTED
+    if isinstance(value, str) and _SECRET_KEY_PATTERN.search(key):
+        return _REDACTED
+    return value
+
 
 _RESERVED = frozenset(
     {
@@ -37,7 +53,11 @@ _RESERVED = frozenset(
 
 
 class JsonFormatter(logging.Formatter):
-    """Format satu baris JSON per record."""
+    """Format satu baris JSON per record.
+
+    Kunci ekstra terindikasi secret (`*token*`, `*secret*`, `*password*`,
+    `*api_key*`, `*dsn*`) otomatis disamarkan.
+    """
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
@@ -48,7 +68,7 @@ class JsonFormatter(logging.Formatter):
         }
         for key, value in record.__dict__.items():
             if key not in _RESERVED and not key.startswith("_"):
-                payload[key] = value
+                payload[key] = _redact(key, value)
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False, default=str)
