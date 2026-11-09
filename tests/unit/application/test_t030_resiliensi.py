@@ -347,6 +347,9 @@ class _NoopTrades:
     async def resolved_trades_for_wallet(self, wallet: str) -> Sequence[ResolvedTrade]:
         return []
 
+    async def list_wallets_with_resolved_trades(self) -> Sequence[str]:
+        return []
+
 
 class _NoopMarkets:
     async def upsert(self, market: Market) -> int:

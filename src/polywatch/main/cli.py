@@ -29,6 +29,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="interval heartbeat dalam detik (default: HEARTBEAT_INTERVAL_S/60)",
     )
     parser.add_argument("--version", action="version", version=f"polywatch {__version__}")
+    sub = parser.add_subparsers(dest="command")
+    recompute_all = sub.add_parser(
+        "recompute-all",
+        help="hitung ulang skor SEMUA wallet kandidat (backfill, T-032)",
+    )
+    recompute_all.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="batasi jumlah wallet yang diproses (urut wallet)",
+    )
+    recompute_all.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="hitung tanpa menulis ke wallet_stats",
+    )
     return parser.parse_args(argv)
 
 
@@ -36,6 +52,45 @@ def _heartbeat_interval(args: argparse.Namespace, settings: Settings) -> float:
     if args.heartbeat_interval is not None:
         return float(args.heartbeat_interval)
     return max(float(settings.heartbeat_interval_s), 0.0)
+
+
+async def _run_recompute_all(settings: Settings, limit: int | None, dry_run: bool) -> int:
+    """Jalankan backfill `recompute_all` satu kali lalu keluar (T-032).
+
+    Merakit RecomputeScores langsung di session factory (bukan scoped
+    session task) — CLI ini bukan bagian runner, jadi session dikelola
+    lokal di sini. Bot/scheduler/ingest tidak disentuh.
+    """
+    from polywatch.application.use_cases.recompute_scores import RecomputeScores
+    from polywatch.infrastructure.db.repositories.trade_repository import (
+        SqlAlchemyTradeRepository,
+    )
+    from polywatch.infrastructure.db.repositories.wallet_stats_repository import (
+        SqlAlchemyWalletStatsRepository,
+    )
+
+    container = Container.build(settings)
+    try:
+        async with container.session_factory() as session:
+            use_case = RecomputeScores(
+                trades=SqlAlchemyTradeRepository(session),
+                wallet_stats=SqlAlchemyWalletStatsRepository(session),
+            )
+            summary = await use_case.recompute_all(limit=limit, dry_run=dry_run)
+            if not dry_run:
+                await session.commit()
+    finally:
+        await container.aclose()
+
+    mode = " (dry-run)" if summary.dry_run else ""
+    sys.stdout.write(
+        f"recompute-all{mode}: {summary.wallets_processed} wallet diproses, "
+        f"{summary.wallets_scored} dengan skor > 0, "
+        f"skor maksimum {summary.top_score}"
+        f" (wallet {summary.top_wallet or '-'}) "
+        f"dalam {summary.duration_sec:.3f}s\n"
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,6 +107,12 @@ def main(argv: list[str] | None = None) -> int:
             f"Field bermasalah: {missing}\n{exc}\n"
         )
         return 2
+
+    if getattr(args, "command", None) == "recompute-all":
+        # Subcommand operasional satu-kali (T-032): tidak mengambil instance
+        # lock dan tidak menjalankan bot/scheduler/ingest.
+        configure_logging(settings.log_level)
+        return asyncio.run(_run_recompute_all(settings, limit=args.limit, dry_run=args.dry_run))
 
     configure_logging(settings.log_level)
     lock = InstanceLock(settings.lock_file)

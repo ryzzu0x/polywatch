@@ -65,6 +65,22 @@ uv run polywatch             # start aplikasi
 Tanpa konfigurasi lengkap, aplikasi berhenti dengan pesan field mana yang bermasalah — tidak ada
 nilai default yang membahayakan.
 
+## Backfill skor wallet (T-032)
+
+`polywatch recompute-all` menghitung ulang skor SEMUA wallet kandidat (union baris `wallet_stats`
+dan wallet dengan trade di market RESOLVED) — dipakai setelah ambang `MIN_SAMPLE_MARKETS` turun
+(ADR-018) atau untuk memperbaiki baris lama. Subcommand ini satu-kali: tidak menjalankan bot,
+scheduler, atau ingest, dan tidak mengambil instance lock, jadi aman dijalankan saat service hidup.
+
+```bash
+uv run polywatch recompute-all --dry-run   # hitung tanpa menulis (preview)
+uv run polywatch recompute-all             # backfill nyata + commit
+uv run polywatch recompute-all --limit 50  # hanya 50 wallet pertama (urut wallet)
+```
+
+Output ringkasan: jumlah wallet diproses, wallet dengan skor > 0, skor maksimum, dan durasi.
+Idempoten — menjalankan ulang dari sumber yang sama menghasilkan nilai yang sama.
+
 ## Quality gate
 
 Wajib hijau sebelum merge ke `main`:

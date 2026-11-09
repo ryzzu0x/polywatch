@@ -68,3 +68,7 @@ class BatchSessionTradeRepository:
     async def resolved_trades_for_wallet(self, wallet: str) -> Sequence[ResolvedTrade]:
         async with self._session_factory() as session:
             return await SqlAlchemyTradeRepository(session).resolved_trades_for_wallet(wallet)
+
+    async def list_wallets_with_resolved_trades(self) -> Sequence[str]:
+        async with self._session_factory() as session:
+            return await SqlAlchemyTradeRepository(session).list_wallets_with_resolved_trades()

@@ -99,6 +99,9 @@ class FakeTradeRepository:
     async def resolved_trades_for_wallet(self, wallet: str) -> Sequence[ResolvedTrade]:
         return []
 
+    async def list_wallets_with_resolved_trades(self) -> Sequence[str]:
+        return []
+
 
 class FakeMarketRepository:
     def __init__(self, markets: dict[int, TokenMarketInfo]) -> None:

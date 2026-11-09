@@ -71,6 +71,12 @@ class SqlAlchemyWalletStatsRepository:
         result = await self._session.execute(stmt)
         return [_to_domain(row) for row in result.scalars().all()]
 
+    async def list_all(self) -> Sequence[str]:
+        """Semua wallet yang sudah punya baris wallet_stats (urut; T-032)."""
+        stmt = select(WalletStatsModel.wallet).order_by(WalletStatsModel.wallet)
+        result = await self._session.execute(stmt)
+        return result.scalars().all()
+
     async def get(self, wallet: str) -> WalletStats | None:
         stmt = select(WalletStatsModel).where(WalletStatsModel.wallet == wallet)
         row = await self._session.scalar(stmt)

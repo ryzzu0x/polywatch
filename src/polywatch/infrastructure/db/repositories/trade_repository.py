@@ -104,6 +104,21 @@ class SqlAlchemyTradeRepository:
         result = await self._session.execute(stmt)
         return result.scalars().all()
 
+    async def list_wallets_with_resolved_trades(self) -> Sequence[str]:
+        """Wallet unik yang punya trade di market RESOLVED (urut; T-032).
+
+        Kandidat `recompute_all`: DISTINCT wallet pada join trades x
+        market_results — hanya satu query daftar (bukan memuat semua trade).
+        """
+        stmt = (
+            select(TradeModel.wallet)
+            .join(MarketResultModel, MarketResultModel.market_id == TradeModel.market_id)
+            .distinct()
+            .order_by(TradeModel.wallet)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalars().all()
+
     async def resolved_trades_for_wallet(self, wallet: str) -> Sequence[ResolvedTrade]:
         """Semua trade wallet pada market yang sudah resolve + arah hasilnya."""
         stmt = (

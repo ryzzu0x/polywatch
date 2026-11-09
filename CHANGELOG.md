@@ -5,6 +5,33 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Added — T-032 (backfill skor wallet: `recompute_all` + CLI)
+- **`RecomputeScores.recompute_all()`** — hitung ulang SEMUA wallet kandidat,
+  bukan hanya wallet yang trading di market yang baru resolve. Kandidat =
+  union baris `wallet_stats` (port `WalletStatsRepository.list_all()`) dan
+  wallet dengan trade di market RESOLVED (port baru
+  `TradeRepository.list_wallets_with_resolved_trades()` — satu query
+  DISTINCT, tidak memuat trade). Tiap wallet diproses satu per satu lewat
+  jalur domain yang sama (`aggregate_market` + `build_wallet_stats` +
+  `ScoringPolicy`) sehingga hanya trade satu wallet berada di memori pada
+  satu waktu. Opsi `limit` (batch pertama, urut wallet) dan `dry_run`.
+  Latar: baris lama dihitung saat `MIN_SAMPLE_MARKETS` masih 50 dan tidak
+  pernah dihitung ulang setelah ambang turun ke 10 (ADR-018) — 1.891 baris
+  `wallet_stats` semuanya `score = 0` padahal ada wallet ≥10 market dengan
+  edge positif, sehingga `evaluate_alert` tidak pernah lolos ambang skor.
+- **CLI `polywatch recompute-all [--limit N] [--dry-run]`** — subcommand
+  operasional satu-kali (T-032): tidak mengambil instance lock, tidak
+  menjalankan bot/scheduler/ingest, commit sekali di akhir, log ringkasan
+  (wallet diproses, skor > 0, maksimum skor, durasi). Backfill nyata di DB
+  lokal: 1.906 wallet diproses dalam 5,7 dtk; wallet `score > 0`
+  0 → **15** (6 kandidat lain terbukti `is_market_maker` → skor 0 sesuai
+  ADR-003); skor maksimum 23,65 (wallet `0x5e8e…8212`, 11 market,
+  edge 0,374, ROI 0,752).
+- **Test:** unit (union kandidat, market maker, dry-run, limit, idempoten,
+  pemrosesan per wallet) + integration DB (2 wallet: 11 market menang →
+  skor > 0, market maker → 0; backfill dari baris lama score=0; idempoten).
+  435 → 445 test.
+
 ### Fixed — T-031 (BUG-015: session ingest keracun `PendingRollbackError` + ADR-018)
 - **BUG-015 (critical):** soak test T-030 menunjukkan 14× `ingest_stream_error`
   berantai — `sqlalchemy.exc.PendingRollbackError: Can't reconnect until

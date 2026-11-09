@@ -22,7 +22,7 @@ class FakeTradeRepository:
 
     def __init__(
         self, resolved: dict[str, list[ResolvedTrade]], market_wallets: dict[int, list[str]]
-    ):
+    ) -> None:
         self._resolved = resolved
         self._market_wallets = market_wallets
 
@@ -37,6 +37,9 @@ class FakeTradeRepository:
 
     async def resolved_trades_for_wallet(self, wallet: str) -> list[ResolvedTrade]:
         return self._resolved.get(wallet, [])
+
+    async def list_wallets_with_resolved_trades(self) -> list[str]:
+        return sorted(self._resolved)
 
 
 class FakeWalletStatsRepository:
@@ -53,6 +56,9 @@ class FakeWalletStatsRepository:
 
     async def get(self, wallet: str) -> WalletStats | None:
         return self.rows.get(wallet)
+
+    async def list_all(self) -> list[str]:
+        return sorted(self.rows)
 
 
 def _trade(

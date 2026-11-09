@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import (
 
 from polywatch.application.use_cases.recompute_scores import RecomputeScores
 from polywatch.domain.market import MarketStatus, Outcome, Timeframe
-from polywatch.domain.scoring import ScoringPolicy
+from polywatch.domain.scoring import ScoringPolicy, WalletStats
 from polywatch.domain.trade import Action
 from polywatch.infrastructure.db.models import (
     AssetModel,
@@ -271,3 +271,139 @@ async def test_recompute_market_tanpa_trade_tidak_menulis_baris(session: AsyncSe
     assert await _wallet_row(session, _WALLET_A) is None
     rows = (await session.execute(select(WalletStatsModel))).scalars().all()
     assert len(rows) == 0
+
+
+# ------------------------------------------------------------- T-032 recompute_all
+
+
+async def test_recompute_all_list_wallets_dan_union_kandidat(session: AsyncSession) -> None:
+    """Repository kandidat: union baris wallet_stats + wallet trade resolve."""
+    session.add(AssetModel(symbol="btc", name="BTC", enabled_default=True))
+    await session.flush()
+    await _seed_market(session, 1, Outcome.UP)
+
+    trades_repo = SqlAlchemyTradeRepository(session)
+    stats_repo = SqlAlchemyWalletStatsRepository(session)
+    await session.commit()
+
+    # kosong: tidak ada kandidat
+    assert list(await trades_repo.list_wallets_with_resolved_trades()) == []
+    assert list(await stats_repo.list_all()) == []
+
+
+async def test_recompute_all_backfill_11_market_dan_idempoten(session: AsyncSession) -> None:
+    """T-032: wallet 11 market menang → skor > 0; market maker → 0.
+
+    Mensimulasikan wallet lama yang dihitung saat MIN_SAMPLE masih 50
+    (baris wallet_stats score=0) lalu di-backfill setelah ambang turun ke
+    10 (ADR-018).
+    """
+    session.add(AssetModel(symbol="btc", name="BTC", enabled_default=True))
+    await session.flush()
+
+    # 11 market resolved, hasil bergantian
+    for m in range(1, 12):
+        await _seed_market(session, m, Outcome.UP if m % 2 == 1 else Outcome.DOWN)
+
+    # wallet A: 11 market, selalu sisi UP, menang 6 → edge positif
+    for i, m in enumerate(range(1, 12), start=1):
+        await _seed_trade(session, m, _WALLET_A, Outcome.UP, "0.50", "50", tx=i)
+
+    # wallet MM: dua sisi di semua market → market maker → skor 0
+    for m in range(1, 12):
+        await _seed_trade(session, m, _WALLET_MM, Outcome.UP, "0.50", "50", tx=100 + m)
+        await _seed_trade(session, m, _WALLET_MM, Outcome.DOWN, "0.50", "50", tx=200 + m)
+
+    # baris wallet_stats lama score=0 (sebelum backfill)
+    await SqlAlchemyWalletStatsRepository(session).upsert(
+        WalletStats(
+            wallet=_WALLET_A,
+            markets_count=11,
+            wins=6,
+            avg_entry=Decimal("0.50"),
+            pnl=Decimal("50"),
+            staked=Decimal("550"),
+            is_market_maker=False,
+            score=Decimal(0),
+        )
+    )
+    await session.commit()
+
+    use_case = await _make_use_case(session, min_sample=10)
+    summary = await use_case.recompute_all()
+    await session.commit()
+
+    assert summary.wallets_processed == 2
+    assert summary.wallets_scored == 1
+    assert summary.top_wallet == _WALLET_A
+    assert summary.duration_sec >= 0
+    assert summary.dry_run is False
+
+    row_a = await _wallet_row(session, _WALLET_A)
+    assert row_a is not None
+    assert row_a.markets_count == 11
+    assert row_a.wins == 6
+    assert row_a.edge > 0
+    assert row_a.score > 0
+
+    row_mm = await _wallet_row(session, _WALLET_MM)
+    assert row_mm is not None
+    assert row_mm.is_market_maker is True
+    assert row_mm.score == Decimal(0)
+
+    first = {
+        "score": row_a.score,
+        "markets_count": row_a.markets_count,
+        "wins": row_a.wins,
+        "edge": row_a.edge,
+    }
+
+    # idempoten: jalankan lagi hasil sama
+    second_summary = await use_case.recompute_all()
+    await session.commit()
+
+    row_a2 = await _wallet_row(session, _WALLET_A)
+    assert row_a2 is not None
+    assert {
+        "score": row_a2.score,
+        "markets_count": row_a2.markets_count,
+        "wins": row_a2.wins,
+        "edge": row_a2.edge,
+    } == first
+    assert second_summary.wallets_scored == summary.wallets_scored
+    assert second_summary.top_score == summary.top_score
+
+    # tidak ada duplikat baris
+    count = len((await session.execute(select(WalletStatsModel))).scalars().all())
+    assert count == 2
+
+
+async def test_recompute_all_dry_run_tidak_menulis(session: AsyncSession) -> None:
+    session.add(AssetModel(symbol="btc", name="BTC", enabled_default=True))
+    await session.flush()
+    for m in range(1, 12):
+        await _seed_market(session, m, Outcome.UP)
+    for i, m in enumerate(range(1, 12), start=1):
+        await _seed_trade(session, m, _WALLET_A, Outcome.UP, "0.50", "50", tx=i)
+    await session.commit()
+
+    use_case = await _make_use_case(session, min_sample=10)
+    summary = await use_case.recompute_all(dry_run=True)
+
+    assert summary.wallets_processed == 1
+    assert summary.dry_run is True
+    assert await _wallet_row(session, _WALLET_A) is None  # tidak ditulis
+
+
+async def test_recompute_all_limit(session: AsyncSession) -> None:
+    session.add(AssetModel(symbol="btc", name="BTC", enabled_default=True))
+    await session.flush()
+    await _seed_market(session, 1, Outcome.UP)
+    await _seed_trade(session, 1, _WALLET_A, Outcome.UP, "0.50", "50", tx=1)
+    await _seed_trade(session, 1, _WALLET_MM, Outcome.UP, "0.50", "50", tx=2)
+    await session.commit()
+
+    use_case = await _make_use_case(session)
+    summary = await use_case.recompute_all(limit=1)
+
+    assert summary.wallets_processed == 1  # hanya wallet pertama (urut)

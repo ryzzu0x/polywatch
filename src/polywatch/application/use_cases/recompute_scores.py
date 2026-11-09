@@ -12,7 +12,9 @@ merangkai data lewat port repository.
 from __future__ import annotations
 
 import logging
+import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
@@ -37,6 +39,18 @@ class RecomputeSummary:
     wallets_processed: int
     top_wallet: str | None
     top_score: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class RecomputeAllSummary:
+    """Hasil recompute_all: wallet diproses dan distribusi skor (T-032)."""
+
+    wallets_processed: int
+    wallets_scored: int
+    top_score: Decimal
+    top_wallet: str | None
+    duration_sec: float
+    dry_run: bool = False
 
 
 @dataclass(slots=True)
@@ -74,6 +88,70 @@ class RecomputeScores:
         )
         return summary
 
+    async def recompute_all(
+        self,
+        limit: int | None = None,
+        dry_run: bool = False,
+        clock: Callable[[], float] | None = None,
+    ) -> RecomputeAllSummary:
+        """Hitung ulang SEMUA wallet kandidat (T-032 backfill).
+
+        Kandidat = union wallet yang sudah punya baris `wallet_stats` dan
+        wallet yang punya trade di market RESOLVED. Tiap wallet diproses
+        satu per satu lewat jalur domain yang sama dengan `execute`
+        (`resolved_trades_for_wallet` → `aggregate_market` →
+        `build_wallet_stats`) — hanya trade satu wallet yang dimuat ke
+        memori pada satu waktu.
+
+        `limit` membatasi jumlah wallet (batch pertama, urut wallet);
+        `dry_run` menghitung tanpa menulis ke `wallet_stats`.
+        `clock` (monotonik, detik) untuk durasi ringkasan; default
+        `time.perf_counter`.
+        """
+        started = (clock or time.perf_counter)()
+        from_stats = await self.wallet_stats.list_all()
+        from_trades = await self.trades.list_wallets_with_resolved_trades()
+        candidates = sorted({*from_stats, *from_trades})
+        if limit is not None and limit >= 0:
+            candidates = candidates[:limit]
+
+        processed = 0
+        scored = 0
+        top_wallet: str | None = None
+        top_score = Decimal(0)
+        for wallet in candidates:
+            stats = await self._recompute_wallet(wallet)
+            if not dry_run:
+                await self.wallet_stats.upsert(stats)
+            processed += 1
+            if stats.score > 0:
+                scored += 1
+                if stats.score > top_score:
+                    top_score = stats.score
+                    top_wallet = stats.wallet
+
+        duration = (clock or time.perf_counter)() - started
+        summary = RecomputeAllSummary(
+            wallets_processed=processed,
+            wallets_scored=scored,
+            top_score=top_score,
+            top_wallet=top_wallet,
+            duration_sec=duration,
+            dry_run=dry_run,
+        )
+        logger.info(
+            "recompute_all selesai",
+            extra={
+                "event": "recompute_all_done",
+                "wallets_processed": summary.wallets_processed,
+                "wallets_scored": summary.wallets_scored,
+                "top_score": str(summary.top_score),
+                "dry_run": dry_run,
+                "duration_sec": round(duration, 3),
+            },
+        )
+        return summary
+
     async def _recompute_wallet(self, wallet: str) -> WalletStats:
         """Statistik wallet dari seluruh market yang sudah resolve."""
         resolved = await self.trades.resolved_trades_for_wallet(wallet)
@@ -99,4 +177,8 @@ class RecomputeScores:
         return replace(stats, last_trade_at=last_trade_at)
 
 
-__all__ = ["RecomputeScores", "RecomputeSummary"]
+__all__ = [
+    "RecomputeAllSummary",
+    "RecomputeScores",
+    "RecomputeSummary",
+]

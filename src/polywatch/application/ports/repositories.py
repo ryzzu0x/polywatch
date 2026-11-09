@@ -116,6 +116,10 @@ class TradeRepository(Protocol):
         """Semua trade wallet pada market yang sudah resolve + arah hasilnya."""
         ...
 
+    async def list_wallets_with_resolved_trades(self) -> Sequence[str]:
+        """Wallet unik yang punya trade di market RESOLVED (kandidat recompute_all)."""
+        ...
+
 
 class WalletStatsRepository(Protocol):
     async def upsert(self, stats: WalletStats) -> None: ...
@@ -123,6 +127,10 @@ class WalletStatsRepository(Protocol):
     async def top(self, limit: int) -> Sequence[WalletStats]: ...
 
     async def get(self, wallet: str) -> WalletStats | None: ...
+
+    async def list_all(self) -> Sequence[str]:
+        """Semua wallet yang sudah punya baris wallet_stats (urut)."""
+        ...
 
 
 class WatchConfigRepository(Protocol):
