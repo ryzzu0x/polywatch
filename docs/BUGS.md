@@ -17,8 +17,8 @@
 | BUG-010 | Cacat dokumen: CHANGELOG ganda, T-018/T-027 tidak tercatat | minor | Tertutup | `cc43404` + docs |
 | BUG-011 | Siklus discover penuh 4–5 menit > interval scheduler 30 dtk | major | Tertutup | `0901f0f` + `6a802b1` |
 | BUG-012 | Kegagalan sumber harga satu market menjatuhkan siklus record_result | major | Tertutup | `d282664` |
-| BUG-013 | Stream WS hidup tapi bisu + token tidak pernah di-refresh saat stream hidup | critical | Menunggu soak | `d282664` |
-| BUG-014 | Notifikasi kesehatan/pemulihan bisa spam | major | Menunggu soak | `d282664` |
+| BUG-013 | Stream WS hidup tapi bisu + token tidak pernah di-refresh saat stream hidup | critical | Tertutup | `d282664` + `abe9373` |
+| BUG-014 | Notifikasi kesehatan/pemulihan bisa spam | major | Tertutup | `d282664` |
 | BUG-015 | Session ingest keracun: PendingRollbackError berantai setelah satu kegagalan DB | critical | Tertutup | T-031 |
 
 ---
@@ -159,6 +159,15 @@
 - **Bukti perbaikan:** unit test (stream bisu → watchdog reconnect; token berubah → re-subscribe paksa; event rutin me-reset watchdog). **Belum ada bukti soak 25 menit** — re-subscribe dan watchdog belum teramati pada run produksi setelah fix.
 - **Status:** Menunggu soak — menunggu soak 25 menit membuktikan  dengan token berubah dan  di log produksi.
 
+
+**Bukti soak 26 menit (2026-11-09 04:02–04:28Z, satu instance, `/tmp/soak-t030f.log`):**
+- `market_result_saved` = 240, **145 di antaranya setelah menit ke-10**
+- `trades` 29.719 → 36.813 (**+7.094**), heartbeat ingest 23× (`trades_saved` 7.094, `last_event_age_s` 0,3)
+- `ingest_resubscribe` 16 token ditambah / 16 dihapus pada pergantian jendela (04:05:22 dan 04:10:23); token hidup 36 → 52
+- `health_stale_detected` = **0**, `scheduler_cycle_error` = **0**, `PendingRollbackError` = **0**
+- durasi siklus: discover median 16,1 dtk (maks 18,7) · result median 6,6 dtk (maks 9,3)
+- satu-satunya ERROR: `TelegramNetworkError` saat `timeout` memutus proses (artefak shutdown)
+
 ## BUG-014 — Notifikasi kesehatan/pemulihan bisa spam
 
 - **Gejala:** alarm basi bisa terkirim berulang; notifikasi pemulihan bisa terkirim lebih dari sekali per episode.
@@ -166,6 +175,15 @@
 - **Perbaikan (T-030/ADR-017):** notifikasi pemulihan hanya sekali per episode stale; jalur no-live-market tidak me-reset ; log  di-rate-limit per komponen per 10 menit.
 - **Bukti perbaikan:** unit test simulasi 2 jam (240 cek, ≤ 12 notifikasi per komponen) dan pemulihan sekali per episode. **Belum ada bukti soak 25 menit**.
 - **Status:** Menunggu soak — menunggu soak 25 menit membuktikan tidak ada spam notifikasi di produksi.
+
+
+**Bukti soak 26 menit (2026-11-09 04:02–04:28Z, satu instance, `/tmp/soak-t030f.log`):**
+- `market_result_saved` = 240, **145 di antaranya setelah menit ke-10**
+- `trades` 29.719 → 36.813 (**+7.094**), heartbeat ingest 23× (`trades_saved` 7.094, `last_event_age_s` 0,3)
+- `health_rate` 16 token ditambah / 16 dihapus pada pergantian jendela (04:05:22 dan 04:10:23); token hidup 36 → 52
+- `health_stale_detected` = **0**, `scheduler_cycle_error` = **0**, `PendingRollbackError` = **0**
+- durasi siklus: discover median 16,1 dtk (maks 18,7) · result median 6,6 dtk (maks 9,3)
+- satu-satunya ERROR: `TelegramNetworkError` saat `timeout` memutus proses (artefak shutdown)
 
 ## BUG-015 — Session ingest keracun: PendingRollbackError berantai
 
