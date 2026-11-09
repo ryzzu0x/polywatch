@@ -241,7 +241,7 @@ async def test_alert_tidak_terkirim_market_maker() -> None:
 async def test_alert_tidak_terkirim_sampel_kurang() -> None:
     stats = WalletStats(
         wallet=WALLET,
-        markets_count=10,
+        markets_count=9,  # di bawah MIN_SAMPLE_MARKETS=10 (ADR-018)
         wins=8,
         avg_entry=Decimal("0.5"),
         pnl=Decimal("50"),

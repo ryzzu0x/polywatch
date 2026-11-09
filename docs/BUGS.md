@@ -16,6 +16,10 @@
 | BUG-009 | Banjir WARNING `payload rusak` dari suplemen Gamma | major | Tertutup | `27b62ac` |
 | BUG-010 | Cacat dokumen: CHANGELOG ganda, T-018/T-027 tidak tercatat | minor | Tertutup | `cc43404` + docs |
 | BUG-011 | Siklus discover penuh 4–5 menit > interval scheduler 30 dtk | major | Tertutup | `0901f0f` + `6a802b1` |
+| BUG-012 | Kegagalan sumber harga satu market menjatuhkan siklus record_result | major | Tertutup | `d282664` |
+| BUG-013 | Stream WS hidup tapi bisu + token tidak pernah di-refresh saat stream hidup | critical | Menunggu soak | `d282664` |
+| BUG-014 | Notifikasi kesehatan/pemulihan bisa spam | major | Menunggu soak | `d282664` |
+| BUG-015 | Session ingest keracun: PendingRollbackError berantai setelah satu kegagalan DB | critical | Tertutup | T-031 |
 
 ---
 
@@ -139,6 +143,47 @@
   ```
 - **Status:** Tertutup — `0901f0f`, `09d0dfb`, `6a802b1`.
 
+## BUG-012 — Kegagalan sumber harga satu market menjatuhkan siklus record_result
+
+- **Gejala:** satu market dengan sumber harga error (Polymarket/Binance timeout) menjatuhkan seluruh siklus  — market lain ikut tertunda dan hasil resmi tidak tersimpan.
+- **Akar masalah:** exception dari  /  tidak ditangkap per market, sehingga melempar keluar  dan membatalkan seluruh batch; sumber harga lama juga melempar (bukan ) setelah retry habis.
+- **Perbaikan (T-030/ADR-017):** exception per market ditangkap (get_result dan pengambilan harga), di-log terstruktur rate-limited (), siklus lanjut; semua sumber harga gagal → hasil resmi tetap tersimpan dengan  dan open/close NULL (kolom / kini nullable + migrasi); sumber harga kembali  setelah retry habis; Binance menambah mirror publik .
+- **Bukti perbaikan (soak test T-030, 2 jam):** 90× , 90× , 0 kegagalan siklus penuh.
+- **Status:** Tertutup — `d282664`.
+
+## BUG-013 — Stream WS hidup tapi bisu + token tidak di-refresh saat stream hidup
+
+- **Gejala:** koneksi WS terbuka tetapi tidak ada event ( tidak timeout); token stream tidak berubah walau jendela market 5m/15m berganti.
+- **Akar masalah:** refresh token hanya terjadi saat stream berakhir, padahal close-1000 tidak selalu datang; tanpa event, loop tunggu tidak pernah mengevaluasi umur stream; klien WS tidak memutus koneksi bisu.
+- **Perbaikan (T-030/ADR-017):** refresh token juga saat stream masih hidup (interval 30 dtk) + re-subscribe paksa bila set token berubah; watchdog 180 dtk tanpa event WS padahal ada token live → paksa reconnect (); klien WS memutus koneksi bisu 60 dtk tanpa frame; T-031 memperkaya log  dengan token lama vs baru (added/removed).
+- **Bukti perbaikan:** unit test (stream bisu → watchdog reconnect; token berubah → re-subscribe paksa; event rutin me-reset watchdog). **Belum ada bukti soak 25 menit** — re-subscribe dan watchdog belum teramati pada run produksi setelah fix.
+- **Status:** Menunggu soak — menunggu soak 25 menit membuktikan  dengan token berubah dan  di log produksi.
+
+## BUG-014 — Notifikasi kesehatan/pemulihan bisa spam
+
+- **Gejala:** alarm basi bisa terkirim berulang; notifikasi pemulihan bisa terkirim lebih dari sekali per episode.
+- **Akar masalah:** pemulihan tidak dibedakan per episode stale; jalur tanpa market LIVE ikut me-reset penanda notifikasi; log  tidak di-rate-limit (1.137 baris / 9,5 jam pada run sebelumnya).
+- **Perbaikan (T-030/ADR-017):** notifikasi pemulihan hanya sekali per episode stale; jalur no-live-market tidak me-reset ; log  di-rate-limit per komponen per 10 menit.
+- **Bukti perbaikan:** unit test simulasi 2 jam (240 cek, ≤ 12 notifikasi per komponen) dan pemulihan sekali per episode. **Belum ada bukti soak 25 menit**.
+- **Status:** Menunggu soak — menunggu soak 25 menit membuktikan tidak ada spam notifikasi di produksi.
+
+## BUG-015 — Session ingest keracun: PendingRollbackError berantai
+
+- **Gejala (soak test T-030, log `/tmp/polywatch-t030-soak.log`):** 14× `ingest_stream_error` berantai dengan pesan akhir:
+  ```
+  sqlalchemy.exc.PendingRollbackError: Can't reconnect until invalid
+  transaction is rolled back.
+  ... ingest_trades.py:444 _process_tx -> trade_repository.py:65
+  insert_many -> session.execute
+  ```
+  Setelah satu kegagalan DB: semua penyimpanan trade berikutnya gagal, stream restart berulang tiap ~35 detik, dan token stream tidak pernah berubah (selalu 36) walau jendela market berganti.
+- **Akar masalah:** loop ingest `run_ingest` merakit `IngestTrades` dengan SATU repository yang mengikat scoped session task ingest seumur proses. Ketika satu `insert_many` gagal, exception naik ke `run()` (di-log `ingest_stream_error`) tetapi transaksi session tidak pernah di-rollback — session berstatus invalid permanen. Siklus berikutnya memakai session yang sama → `PendingRollbackError` untuk setiap insert → tidak ada trade yang tersimpan lagi sampai proses restart. `release_session` di `finally` baru jalan saat loop keluar, terlambat.
+- **Perbaikan (T-031):** dua lapis.
+  1. **Session baru per batch (infrastruktur):** `BatchSessionTradeRepository` membuka session baru dari `session_factory` untuk setiap `insert_many`, commit saat sukses, rollback + close di `finally` — kegagalan satu batch tidak meninggalkan session invalid yang menular. Container memasang repo ini untuk ingest.
+  2. **Isolasi kegagalan (use case):** `_insert_batch` menangkap exception penyimpanan, me-log terstruktur rate-limited `ingest_batch_error` (kegagalan pertama + tiap ke-10) dan heartbeat not-ok, lalu stream LANJUT ke tx berikutnya — satu batch gagal tidak mematikan stream.
+- **Bukti perbaikan:** unit test reproduksi (insert gagal sekali → batch berikutnya tetap tersimpan, `ingest_batch_error` ter-log; stream tetap satu koneksi saat insert selalu gagal; session gagal → rollback + close, session berikutnya segar dan bisa commit) + integration DB (constraint violation → session baru tetap sukses).
+- **Status:** Tertutup — T-031 (`fix(T-031)`).
+
 ---
 
 ## Pelajaran yang diambil
@@ -147,4 +192,5 @@
 2. **`Any` di composition root menyembunyikan ketidakcocokan kontrak.** Tipe eksplisit + test kontrak lewat container nyata menutup celah ini.
 3. **Test dengan fake bisa lolos meski produksi rusak.** Test kontrak harus memakai wadah nyata (Container), bukan hanya objek palsu.
 4. **Metrik kesehatan harus berbasis heartbeat komponen**, bukan turunan data bisnis yang wajar kosong (pasar sepi).
-5. **Satu instance, satu lock.** Dua proses menghasilkan alert ganda dan konflik polling yang membingungkan saat diagnosa.
+5. **Session berumur panjang adalah bom waktu.** AsyncSession yang ditahan seumur loop (BUG-015) menjadi invalid permanen setelah satu kegagalan dan meracuni semua operasi berikutnya — unit-of-work per batch (session baru + rollback/close di finally) adalah satu-satunya pola aman untuk loop kontinyu.
+6. **Satu instance, satu lock.** Dua proses menghasilkan alert ganda dan konflik polling yang membingungkan saat diagnosa.

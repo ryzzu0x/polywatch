@@ -5,6 +5,38 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+### Fixed — T-031 (BUG-015: session ingest keracun `PendingRollbackError` + ADR-018)
+- **BUG-015 (critical):** soak test T-030 menunjukkan 14× `ingest_stream_error`
+  berantai — `sqlalchemy.exc.PendingRollbackError: Can't reconnect until
+  invalid transaction is rolled back` dari `_process_tx → insert_many →
+  session.execute`. Loop ingest memakai SATU scoped session seumur proses;
+  satu kegagalan DB meninggalkan transaksi invalid yang meracuni SEMUA
+  penyimpanan berikutnya sampai restart (stream restart tiap ~35 dtk,
+  `trades` beku, token stream tidak pernah berubah walau jendela berganti).
+  **Perbaikan (ADR-017):** (1) `BatchSessionTradeRepository` — session BARU
+  dari factory untuk setiap `insert_many`, commit saat sukses, rollback +
+  close selalu (unit-of-work per batch); container memasangnya untuk ingest.
+  (2) Isolasi kegagalan di use case: `_insert_batch` menangkap exception,
+  me-log `ingest_batch_error` terstruktur rate-limited + heartbeat not-ok,
+  stream LANJUT ke tx berikutnya — satu batch gagal tidak mematikan stream.
+  (3) Log `ingest_resubscribe` kini mencatat token lama vs baru
+  (`tokens_old`/`tokens_new`/`tokens_added`/`tokens_removed`) — pertukaran
+  set token saat jendela 5m/15m berganti bisa diaudit.
+- **Test regresi:** insert gagal sekali → batch berikutnya tetap tersimpan;
+  stream tetap satu koneksi saat insert selalu gagal; session gagal →
+  rollback + close tidak menular; integration DB: constraint violation →
+  session baru tetap sukses. 427 → 435 test.
+
+### Changed — T-031 (MIN_SAMPLE_MARKETS=10, ADR-018)
+- `MIN_SAMPLE_MARKETS` dan default `ScoringPolicy.min_sample` 50 → **10**
+  untuk MVP: data nyata menunjukkan 0 dari 1.891 wallet mencapai 50 market
+  resolve (65 ≥ 10) sehingga alert otomatis mustahil menyala. `shrinkage_k`
+  **tetap 50** — nilai efektif tetap disusutkan n/(n+k) (edge 20%: n=5 →
+  1,8%; n=100 → 13,3%) sehingga sampel kecil otomatis diredam. Kembali ke
+  50 saat v1/v2 (uang sungguhan); parameter tetap injectable lewat
+  `ScoringPolicy`. Penjelasan untuk owner: `docs/CATATAN.md`.
+
+
 ### Fixed — T-029 (siklus lambat + alarm basi: paralelisasi, batch, ambang adaptif)
 - **Siklus discover 4–5 menit → < 21 detik:** fetch slug Gamma kini
   paralel lewat `asyncio.gather` + `asyncio.Semaphore`

@@ -181,6 +181,7 @@ class IngestTrades:
         self._total_events = 0
         self._total_saved = 0
         self._last_event_ts: float | None = None  # epoch clock
+        self._batch_errors = 0  # BUG-015: penghitung batch gagal (log rate-limited)
 
     async def _heartbeat(self, ok: bool = True) -> None:
         """Laporkan aktivitas ingest ke health monitor (T-027).
@@ -337,13 +338,26 @@ class IngestTrades:
     def _log_resubscribe(
         self, old: Sequence[TokenMarketInfo], new: Sequence[TokenMarketInfo]
     ) -> None:
+        """Log re-subscribe dengan token lama vs baru (BUG-015).
+
+        Soak test T-030 menunjukkan token stream tidak pernah berubah
+        walau jendela market berganti — log ini membuat pertukaran set
+        token bisa diaudit: jumlah token lama vs baru dan berapa yang
+        benar-benar bertukar (bukan sekadar selisih jumlah, yang 0 bila
+        jendela 5m berganti dengan jumlah market tetap sama).
+        """
+        old_tokens = set(_token_map(old))
+        new_tokens = set(_token_map(new))
         logger.info(
             "token live berubah; re-subscribe",
             extra={
                 "event": "ingest_resubscribe",
-                "markets": len(new),
-                "tokens": len(_token_map(new)),
-                "changed": abs(len(new) - len(old)),
+                "markets_old": len(old),
+                "markets_new": len(new),
+                "tokens_old": len(old_tokens),
+                "tokens_new": len(new_tokens),
+                "tokens_added": len(new_tokens - old_tokens),
+                "tokens_removed": len(old_tokens - new_tokens),
             },
         )
 
@@ -384,6 +398,7 @@ class IngestTrades:
                 "live_markets": self._watchdog.live_markets,
                 "events_seen": self._total_events,
                 "trades_saved": self._total_saved,
+                "batch_errors": self._batch_errors,
                 "last_event_age_s": last_age,
                 "watchdog_forced": self._watchdog.forced,
             },
@@ -441,9 +456,7 @@ class IngestTrades:
             trades.extend(_fill_to_trades(fill, market, now))
         if not trades:
             return
-        saved = await self._trades.insert_many(trades)
-        stats.trades_saved += saved
-        self._total_saved += saved
+        saved = await self._insert_batch(trades, stats)
         stats.latency_ms.append((now.timestamp() - received_at) * 1000)
         if saved > 0:
             if self._on_batch_commit is not None:
@@ -452,6 +465,42 @@ class IngestTrades:
                 await self._on_batch_commit()
             if self._on_saved is not None:
                 await self._on_saved(trades)
+
+    async def _insert_batch(self, trades: list[Trade], stats: IngestStats) -> int:
+        """Simpan satu batch dengan isolasi kegagalan (BUG-015/ADR-017).
+
+        Satu batch gagal (DB down, constraint, deadlock) TIDAK boleh
+        mematikan stream — exception ditangkap, di-log terstruktur
+        rate-limited (`ingest_batch_error`), dan stream lanjut ke tx
+        berikutnya. Batch yang gagal hilang untuk sementara; backfill
+        Data API dan idempotensi `insert_many` menutup gap saat jalur
+        pulih. Sebelum fix, exception ini naik sampai `run()` →
+        `ingest_stream_error` berulang + `PendingRollbackError` menular
+        ke semua batch berikutnya.
+        """
+        try:
+            saved = await self._trades.insert_many(trades)
+        except Exception as exc:
+            self._batch_errors += 1
+            if self._batch_errors == 1 or self._batch_errors % 10 == 0:
+                # Rate-limit: batch gagal biasanya beruntun (DB down) —
+                # jangan banjiri journald; penghitung tetap naik tiap gagal
+                # dan muncul di heartbeat `ingest_heartbeat`.
+                logger.error(
+                    "gagal menyimpan batch trade; stream dilanjutkan",
+                    extra={
+                        "event": "ingest_batch_error",
+                        "error": type(exc).__name__,
+                        "trades": len(trades),
+                        "batch_errors": self._batch_errors,
+                        "tx_hash": trades[0].tx_hash,
+                    },
+                )
+            await self._heartbeat(ok=False)
+            return 0
+        stats.trades_saved += saved
+        self._total_saved += saved
+        return saved
 
     async def backfill(self, market_id: int, since: datetime | None = None) -> int:
         """Tutup gap trade market lewat Data API v2 (jalur lambat, 164 s).

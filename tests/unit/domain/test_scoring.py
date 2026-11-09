@@ -84,8 +84,26 @@ def test_sampel_kecil_belum_layak_dapat_alert() -> None:
     assert stats.is_alertable is False
 
 
+def test_min_sample_default_10_adr018() -> None:
+    """ADR-018: default min_sample = 10 untuk MVP (0 wallet mencapai 50);
+    wallet dengan tepat 10 market resolve sudah layak alert, 9 belum."""
+    assert MIN_SAMPLE_MARKETS == 10
+    assert ScoringPolicy().min_sample == 10
+    assert _stats(markets_count=10).has_enough_sample is True
+    assert _stats(markets_count=9).has_enough_sample is False
+
+
+def test_shrinkage_k_tetap_50_adr018() -> None:
+    """ADR-018: shrinkage_k TETAP 50 — penyusutan meredam alert lebih berisik."""
+    policy = ScoringPolicy()
+    assert policy.shrinkage_k == Decimal(50)
+    # edge 20%: n=10 → 20*10/60 ≈ 3,3%; n=100 → 20*100/150 ≈ 13,3%
+    stats = _stats(markets_count=10, wins=10, avg_entry=Decimal("0.80"))
+    assert edge_shrunk(stats, policy) == Decimal("0.20") * Decimal(10) / Decimal(60)
+
+
 def test_market_maker_tidak_layak_dapat_alert() -> None:
-    stats = _stats(is_market_maker=True)
+    stats = _stats(markets_count=MIN_SAMPLE_MARKETS, is_market_maker=True)
 
     assert stats.has_enough_sample is True
     assert stats.is_alertable is False

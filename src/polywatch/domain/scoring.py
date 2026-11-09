@@ -16,7 +16,7 @@ from decimal import Decimal
 from polywatch.domain.market import Outcome
 from polywatch.domain.trade import Trade
 
-MIN_SAMPLE_MARKETS = 50
+MIN_SAMPLE_MARKETS = 10  # ADR-018: 10 untuk MVP (0 wallet mencapai 50); v1/v2 kembali 50
 DEFAULT_MIN_SCORE = 60.0
 
 _ZERO = Decimal(0)

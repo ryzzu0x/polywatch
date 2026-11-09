@@ -541,14 +541,14 @@ class Container:
             SqlAlchemyAlertSettingsRepository,
             SqlAlchemyAlertsSentRepository,
         )
+        from polywatch.infrastructure.db.repositories.batch_trade_repository import (
+            BatchSessionTradeRepository,
+        )
         from polywatch.infrastructure.db.repositories.live_token_query import (
             SqlAlchemyLiveTokenQuery,
         )
         from polywatch.infrastructure.db.repositories.market_repository import (
             SqlAlchemyMarketRepository,
-        )
-        from polywatch.infrastructure.db.repositories.trade_repository import (
-            SqlAlchemyTradeRepository,
         )
         from polywatch.infrastructure.db.repositories.user_repository import (
             SqlAlchemyUserRepository,
@@ -638,7 +638,11 @@ class Container:
                 ingest = IngestTrades(
                     stream=OrderbookWsAdapter(ws_client),
                     receipts=PolygonReceiptAdapter(rpc),
-                    trades=SqlAlchemyTradeRepository(self.scoped_session()),
+                    # BUG-015/ADR-017: session BARU per batch — loop ingest
+                    # tidak lagi menahan satu scoped session yang bisa
+                    # invalid permanen setelah satu kegagalan DB
+                    # (PendingRollbackError berantai di soak T-030).
+                    trades=BatchSessionTradeRepository(self.session_factory),
                     markets=SqlAlchemyMarketRepository(self.scoped_session()),
                     clock=self.clock,
                     live_tokens=_ScopedLiveTokens(),
