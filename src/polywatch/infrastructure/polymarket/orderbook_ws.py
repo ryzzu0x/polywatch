@@ -190,7 +190,14 @@ class OrderbookWsClient:
                 await asyncio.sleep(delay)
 
     async def _stream(self, ws: websockets.ClientConnection) -> AsyncIterator[LastTradeEvent]:
-        """Baca frame sampai koneksi tutup; kirim PING berkala."""
+        """Baca frame sampai koneksi tutup; kirim PING berkala.
+
+        T-030/ADR-017 (BUG-013): koneksi WS bisa "hidup tapi bisu" — recv()
+        tidak timeout, PING klien tetap terkirim (protokol level koneksi,
+        bukan bukti event). Timeout tanpa frame apa pun memicu
+        `ws_silent_disconnect` sehingga generator kembali ke loop connect
+        dan membuka koneksi baru dengan token terbaru.
+        """
         ping_task = asyncio.create_task(self._heartbeat(ws))
         try:
             while True:
@@ -199,7 +206,20 @@ class OrderbookWsClient:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=RECV_TIMEOUT_S)
                 except TimeoutError:
-                    continue
+                    # T-030: 60 dtk tanpa frame sama sekali (bukan sekadar
+                    # tanpa trade) — koneksi dicurigai bisu; putuskan
+                    # terkontrol supaya token terbaru di-subscribe ulang.
+                    logger.warning(
+                        "ws tidak ada frame dalam RECV_TIMEOUT_S; putuskan",
+                        extra={
+                            "event": "ws_silent_disconnect",
+                            "timeout_s": RECV_TIMEOUT_S,
+                            "tokens": len(self._tokens),
+                        },
+                    )
+                    with contextlib.suppress(Exception):
+                        await ws.close()
+                    return
                 except asyncio.CancelledError:
                     raise
                 if not isinstance(raw, str) or raw in ("PING", "PONG"):

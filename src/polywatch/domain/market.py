@@ -151,11 +151,16 @@ def status_at(slug: MarketSlug, moment: datetime) -> MarketStatus:
 
 @dataclass(frozen=True, slots=True)
 class MarketResult:
-    """Hasil resmi market yang sudah resolved (sumber: Gamma)."""
+    """Hasil resmi market yang sudah resolved (sumber: Gamma).
+
+    T-030/ADR-017: `open_price`/`close_price` opsional — bila semua sumber
+    harga gagal, hasil resmi tetap disimpan dengan `price_source='unavailable'`
+    dan harga NULL (arah hasil tetap dari resolusi resmi Gamma).
+    """
 
     market_id: int
-    open_price: Decimal
-    close_price: Decimal
+    open_price: Decimal | None
+    close_price: Decimal | None
     result: Outcome
     volume_usdc: Decimal
     price_source: str

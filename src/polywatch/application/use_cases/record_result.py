@@ -7,13 +7,24 @@ Untuk market CLOSED yang belum punya baris `market_results`:
    toleran: retry tiap `poll_interval_sec` (default 30 s).
 2. Arah hasil (`Outcome`) HANYA dari `outcomePrices` resolusi resmi —
    resolusi resmi adalah sumber kebenaran; harga open/close hanya informasi.
-3. Harga open/close dari `PriceSource` utama; bila None (mis. window sudah
-   bergeser), fallback `PriceSource` cadangan. `price_source` selalu terisi.
+3. Harga open/close dari `PriceSource` utama; bila gagal/None (mis. window
+   sudah bergeser), fallback `PriceSource` cadangan. `price_source` selalu
+   terisi.
 4. Simpan `MarketResult` (idempoten) + transisi status market
    CLOSED → RESOLVED lewat aturan domain.
 5. Setelah `timeout_sec` (default 15 menit) belum resolved: kirim notifikasi
    ke owner lewat `Notifier` (maksimal sekali per market) + log error
    terstruktur.
+
+T-030 (ADR-017) — isolasi kegagalan per market: kegagalan apapun saat
+memproses satu market (sumber harga raise, resolusi Gamma error, DB)
+ditangkap per market, di-log (`record_result_market_error` /
+`record_result_market_skipped`), dan siklus LANJUT ke market berikutnya —
+satu market gagal tidak lagi menjatuhkan seluruh siklus (BUG-012: 181x
+`scheduler_cycle_error` mematikan `market_result_saved` total). Bila semua
+sumber harga gagal untuk market yang sudah resolved, hasil resmi tetap
+disimpan dengan `price_source='unavailable'` dan open/close NULL — arah
+hasil tetap dari resolusi resmi.
 """
 
 from __future__ import annotations
@@ -49,6 +60,10 @@ DEFAULT_TIMEOUT_SEC = 15 * 60.0
 UNAVAILABLE_PRICE_SOURCE = "unavailable"
 #: T-029/ADR-016: default jumlah market CLOSED yang diproses per siklus.
 DEFAULT_BATCH_SIZE = 10
+#: T-030/ADR-017: rate-limit log per-market yang sama (market dengan sumber
+#: harga rusak bisa muncul tiap siklus sampai window-nya bergeser — log
+#: lengkap cukup sekali per 10 menit per market).
+_MARKET_LOG_INTERVAL_SEC = 600.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +72,7 @@ class RecordResultSummary:
 
     market_id: int
     slug: str
-    status: str  # "resolved" | "timeout"
+    status: str  # "resolved" | "timeout" | "skipped" | "deferred"
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +104,9 @@ class RecordResult:
     batch_size: int = DEFAULT_BATCH_SIZE
     sleep: Callable[[float], Awaitable[None]] | None = None  # di-inject test
     _notified: set[int] = field(default_factory=set, repr=False)
+    #: T-030/ADR-017: timestamp log error/skip terakhir per market_id —
+    #: market bermasalah tidak membanjiri log tiap siklus.
+    _last_market_log: dict[int, float] = field(default_factory=dict, repr=False)
 
     async def execute_once(self, market: Market, market_id: int) -> RecordResultSummary:
         """Proses satu market CLOSED sampai resolved atau timeout."""
@@ -120,8 +138,18 @@ class RecordResult:
         berikutnya (delay resolusi Gamma ±343 s wajar melebihi interval 60 s;
         menunggu di dalam siklus membuat loop > interval — BUG-011).
         Notifikasi timeout tetap dievaluasi dari umur market (`end_at` +
-        `timeout_sec` vs now), bukan dari jumlah poll. Return list ringkasan
-        per market + satu `RecordResultCycleSummary` di akhir (durasi siklus).
+        `timeout_sec` vs now), bukan dari jumlah poll.
+
+        T-030/ADR-017 (BUG-012): kegagalan memproses SATU market — termasuk
+        `PriceSourceError` dari sumber harga — ditangkap, di-log
+        (`record_result_market_error`), dan siklus lanjut ke market
+        berikutnya. Hasil resmi tidak pernah hilang hanya karena sumber
+        harga sedang bermasalah: market gagal di-retry siklus berikutnya,
+        dan bila sumber harga kembali gagal sampai resolusinya pun basi,
+        hasil tetap disimpan dengan `price_source='unavailable'`.
+
+        Return list ringkasan per market + satu `RecordResultCycleSummary`
+        di akhir (durasi siklus).
         """
         import time as _time
 
@@ -129,14 +157,30 @@ class RecordResult:
         pending = await self.repository.list_pending_resolution(limit=self._effective_batch())
         results: list[RecordResultSummary] = []
         deferred = 0
+        skipped = 0
         for item in pending:
             if await self.repository.has_result(item.market_id):
                 continue  # sudah terarsip: idempoten lintas siklus
             market = _pending_to_market(item)
             slug_str = _slug_str(market)
-            snapshot = await self.source.get_result(slug_str)
+            try:
+                snapshot = await self.source.get_result(slug_str)
+            except Exception as exc:
+                # sumber resolusi error: tunda market ini, lanjut market lain
+                skipped += 1
+                self._log_market_error(item.market_id, slug_str, "get_result", exc)
+                results.append(RecordResultSummary(item.market_id, slug_str, "skipped"))
+                continue
             if snapshot is not None and snapshot.resolved and snapshot.outcome is not None:
-                await self._record(market, item.market_id, snapshot)
+                try:
+                    await self._record(market, item.market_id, snapshot)
+                except Exception as exc:
+                    # BUG-012: harga/repo gagal untuk market ini — jangan
+                    # jatuhkan seluruh siklus; retry siklus berikutnya.
+                    skipped += 1
+                    self._log_market_error(item.market_id, slug_str, "_record", exc)
+                    results.append(RecordResultSummary(item.market_id, slug_str, "skipped"))
+                    continue
                 results.append(RecordResultSummary(item.market_id, slug_str, "resolved"))
                 continue
             # Belum resolved: tunda ke siklus berikutnya — satu poll per siklus.
@@ -158,11 +202,50 @@ class RecordResult:
                 "resolved": cycle.resolved,
                 "timeout": cycle.timeout,
                 "deferred": deferred,
+                "skipped": skipped,
                 "batch_size": self._effective_batch(),
                 "duration_ms": cycle.duration_ms,
             },
         )
         return [*results, cycle]
+
+    def _now_ts(self) -> float:
+        if self.clock is not None:
+            return self.clock.now().timestamp()
+        return datetime.now(tz=UTC).timestamp()
+
+    def _log_market_error(self, market_id: int, slug: str, stage: str, exc: Exception) -> None:
+        """Log error per market dengan rate-limit (T-030, ADR-017).
+
+        Market dengan sumber harga rusak bisa muncul tiap siklus sampai
+        window-nya bergeser — log TRACEBACK penuh cukup sekali per
+        `_MARKET_LOG_INTERVAL_SEC` per market, sisanya ringkasan DEBUG.
+        """
+        now = self._now_ts()
+        last = self._last_market_log.get(market_id, 0.0)
+        if now - last >= _MARKET_LOG_INTERVAL_SEC:
+            self._last_market_log[market_id] = now
+            logger.error(
+                "record_result: market gagal diproses, skip ke siklus berikutnya",
+                extra={
+                    "event": "record_result_market_error",
+                    "market_id": market_id,
+                    "slug": slug,
+                    "stage": stage,
+                },
+                exc_info=exc,
+            )
+        else:
+            logger.debug(
+                "record_result: market masih gagal (sudah di-log baru-baru ini)",
+                extra={
+                    "event": "record_result_market_skipped",
+                    "market_id": market_id,
+                    "slug": slug,
+                    "stage": stage,
+                    "error": str(exc)[:150],
+                },
+            )
 
     def _is_timeout(self, market: Market) -> bool:
         """Market melewati batas waktu resolusi (dihitung dari `end_at`)."""
@@ -206,25 +289,45 @@ class RecordResult:
             },
         )
 
-    async def _open_close(self, slug: str) -> tuple[str, tuple[Decimal, Decimal]]:
-        """Harga open/close dari sumber utama, fallback bila None.
+    async def _open_close(self, slug: str) -> tuple[str, tuple[Decimal | None, Decimal | None]]:
+        """Harga open/close dari sumber utama, fallback bila gagal/None.
 
-        `price_source` selalu terisi; bila kedua sumber gagal, dipakai
-        sentinel `unavailable` dengan harga 0/0 supaya baris tetap tersimpan
+        T-030/ADR-017 (BUG-012): `PriceSource` bisa melempar (contoh nyata:
+        `BinancePriceSourceError` / `PolymarketPriceSourceError` setelah
+        retry habis) — raise ditangkap di sini dan dicoba ke sumber
+        berikutnya, bukan menjatuhkan siklus. `price_source` selalu
+        terisi; bila semua sumber gagal (None ATAU raise), dipakai sentinel
+        `unavailable` dengan harga NULL supaya baris tetap tersimpan
         (arah hasil tetap dari resolusi resmi).
         """
-        pair = await self.primary_price.open_close(slug)
-        if pair is not None:
-            return self.primary_price.name, pair
-        if self.fallback_price is not None:
-            pair = await self.fallback_price.open_close(slug)
+        for source in self._price_sources():
+            try:
+                pair = await source.open_close(slug)
+            except Exception as exc:
+                logger.warning(
+                    "sumber harga melempar error, coba sumber berikutnya",
+                    extra={
+                        "event": "price_source_error",
+                        "price_source": source.name,
+                        "slug": slug,
+                        "error": str(exc)[:200],
+                    },
+                )
+                continue
             if pair is not None:
-                return self.fallback_price.name, pair
+                return source.name, pair
         logger.warning(
-            "open/close tidak tersedia dari kedua sumber harga",
+            "open/close tidak tersedia dari semua sumber harga",
             extra={"event": "price_unavailable", "slug": slug},
         )
-        return UNAVAILABLE_PRICE_SOURCE, (Decimal("0"), Decimal("0"))
+        return UNAVAILABLE_PRICE_SOURCE, (None, None)
+
+    def _price_sources(self) -> tuple[PriceSource, ...]:
+        """Sumber harga berurutan: utama lalu cadangan (bila ada)."""
+        sources: list[PriceSource] = [self.primary_price]
+        if self.fallback_price is not None:
+            sources.append(self.fallback_price)
+        return tuple(sources)
 
     async def _notify_timeout(self, market: Market, market_id: int) -> None:
         """Notifikasi owner sekali per market bila resolusi tidak keluar."""

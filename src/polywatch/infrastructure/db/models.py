@@ -81,8 +81,10 @@ class MarketResultModel(Base):
     market_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("markets.id", ondelete="CASCADE"), primary_key=True
     )
-    open_price: Mapped[Decimal] = mapped_column(Numeric(20, 10))
-    close_price: Mapped[Decimal] = mapped_column(Numeric(20, 10))
+    # T-030/ADR-017: nullable — hasil resmi tetap tersimpan meski semua
+    # sumber harga gagal (price_source='unavailable', harga NULL).
+    open_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    close_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
     result: Mapped[Outcome] = mapped_column(_OUTCOME)
     volume_usdc: Mapped[Decimal] = mapped_column(Numeric(20, 6))
     price_source: Mapped[str]

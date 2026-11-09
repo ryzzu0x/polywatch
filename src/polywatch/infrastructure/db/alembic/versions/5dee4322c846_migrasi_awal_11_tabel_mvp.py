@@ -106,8 +106,10 @@ def upgrade() -> None:
     op.create_table(
         "market_results",
         sa.Column("market_id", sa.BigInteger(), nullable=False),
-        sa.Column("open_price", sa.Numeric(precision=20, scale=10), nullable=False),
-        sa.Column("close_price", sa.Numeric(precision=20, scale=10), nullable=False),
+        # T-030/ADR-017: nullable — hasil resmi tetap tersimpan meski semua
+        # sumber harga gagal (price_source='unavailable', harga NULL).
+        sa.Column("open_price", sa.Numeric(precision=20, scale=10), nullable=True),
+        sa.Column("close_price", sa.Numeric(precision=20, scale=10), nullable=True),
         sa.Column(
             "result",
             sa.Enum("UP", "DOWN", name="outcome", native_enum=False, length=16),

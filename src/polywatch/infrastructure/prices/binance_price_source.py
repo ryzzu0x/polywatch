@@ -3,6 +3,12 @@
 Open = harga open kline menit pertama window, close = harga close kline
 menit terakhir. Akurasi terukur 85,4% terhadap resolusi resmi — dipakai
 sebagai fallback/cross-check, asal harga disimpan di kolom `price_source`.
+
+T-030/ADR-017: kegagalan permanen (setelah retry + mirror publik
+`data-api.binance.vision`) mengembalikan None, bukan raise — use case
+`record_result` memakai None sebagai sinyal "sumber ini habis" dan
+melanjutkan ke sumber berikutnya / sentinel `unavailable`, sehingga
+kegagalan satu sumber harga tidak menjatuhkan siklus (BUG-012).
 """
 
 from __future__ import annotations
@@ -25,8 +31,19 @@ _TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 0.5  # detik
 
+# T-030/ADR-017: fallback TERAKHIR saat api.binance.com (dan Polymarket
+# crypto-price) sama-sama gagal — mirror publik data-api.binance.vision.
+# Overhead hanya satu request per market yang sudah gagal di dua sumber
+# lain, jadi tidak menambah beban pada jalur sehat.
+_BINANCE_MIRROR_URL = "https://data-api.binance.vision"
+
 # pasangan simbol Binance untuk aset yang dipantau (fallback: USDT generik)
 _SYMBOL_SUFFIX = "USDT"
+
+# aset yang tidak diperdagangkan di Binance (metals via CFD/spot lain) —
+# klines Binance tidak akan pernah tersedia; langsung kembalikan None
+# tanpa 3x retry sia-sia.
+_UNSUPPORTED_SYMBOLS = frozenset({"xau", "xag"})
 
 
 class BinancePriceSourceError(RuntimeError):
@@ -63,6 +80,17 @@ class BinancePriceSource:
             logger.warning("price source: slug tidak valid", extra={"slug": slug})
             return None
 
+        # Aset tanpa pair di Binance: hindari 3x retry yang pasti gagal.
+        if parsed.asset.symbol.lower() in _UNSUPPORTED_SYMBOLS:
+            logger.info(
+                "price source: aset tidak tersedia di Binance",
+                extra={"slug": slug, "symbol": parsed.asset.symbol},
+            )
+            return None
+
+        # T-030/ADR-017: coba host utama lalu mirror publik sebagai upaya
+        # terakhir sebelum menyerah (tetap None, bukan raise, supaya use
+        # case bisa fallback ke sumber lain / sentinel 'unavailable').
         params = {
             "symbol": f"{parsed.asset.symbol.upper()}{_SYMBOL_SUFFIX}",
             "interval": "1m",
@@ -70,7 +98,17 @@ class BinancePriceSource:
             "endTime": str(int(parsed.end_at.timestamp() * 1000)),
             "limit": "1000",
         }
-        url = f"{self._base_url}/api/v3/klines"
+        for base_url in dict.fromkeys((self._base_url, _BINANCE_MIRROR_URL)):
+            pair = await self._fetch_klines(base_url, params, slug)
+            if pair is not None:
+                return pair
+        return None
+
+    async def _fetch_klines(
+        self, base_url: str, params: dict[str, str], slug: str
+    ) -> tuple[Decimal, Decimal] | None:
+        """Satu endpoint klines dengan retry; None bila gagal/kosong."""
+        url = f"{base_url.rstrip('/')}/api/v3/klines"
         last_error: Exception | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
@@ -92,6 +130,9 @@ class BinancePriceSource:
                         },
                     )
                     await asyncio.sleep(delay)
-        raise BinancePriceSourceError(
-            f"klines Binance {url} gagal setelah {_MAX_RETRIES} percobaan (slug={slug!r})"
-        ) from last_error
+        logger.warning(
+            "klines Binance gagal setelah semua percobaan",
+            extra={"event": "binance_klines_failed", "url": url, "slug": slug},
+        )
+        assert last_error is not None
+        return None

@@ -7,6 +7,11 @@ server (selalu window aktif) — open harus dicatat saat window berjalan,
 close saat window berakhir. Method ini hanya berguna ketika window masih
 aktif/sesaat setelahnya; untuk window yang sudah bergeser kembalikan None
 supaya use case jatuh ke sumber cadangan.
+
+T-030/ADR-017: kegagalan permanen setelah retry mengembalikan None, bukan
+raise — use case `record_result` memakai None sebagai sinyal "sumber ini
+habis" dan melanjutkan ke sumber cadangan / sentinel `unavailable`,
+sehingga kegagalan satu sumber harga tidak menjatuhkan siklus (BUG-012).
 """
 
 from __future__ import annotations
@@ -107,6 +112,9 @@ class PolymarketPriceSource:
                         },
                     )
                     await asyncio.sleep(delay)
-        raise PolymarketPriceSourceError(
-            f"crypto-price {url} gagal setelah {_MAX_RETRIES} percobaan (slug={slug!r})"
-        ) from last_error
+        logger.warning(
+            "crypto-price gagal setelah semua percobaan",
+            extra={"event": "crypto_price_failed", "url": url, "slug": slug},
+        )
+        assert last_error is not None
+        return None

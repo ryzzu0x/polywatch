@@ -247,13 +247,17 @@ async def test_masih_stale_di_bawah_rate_limit_tidak_kirim_lagi() -> None:
     clock.advance(601)
     await monitor.record_cycle("discover", ok=True)
     await monitor.record_cycle("result", ok=True)
-    await monitor.check()  # notifikasi pertama
+    await monitor.check()  # notifikasi pertama (+ log stale pertama)
     clock.advance(300)  # 5 menit kemudian — masih di bawah 10 menit
     await monitor.record_cycle("discover", ok=True)
     await monitor.record_cycle("result", ok=True)
     report = await monitor.check()
 
-    assert report.stale_names == ("ingest",)
+    # T-030/BUG-014: masih dalam jendela log 10 menit → tidak di-log lagi,
+    # tapi komponen tetap tercatat stale di `components`.
+    assert report.stale_names == ()
+    ingest = next(c for c in report.components if c.name == "ingest")
+    assert ingest.stale is True
     assert len(notifier.sent) == 1  # tidak ada pesan baru
 
 

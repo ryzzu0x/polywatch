@@ -10,12 +10,10 @@ import respx
 
 from polywatch.infrastructure.prices.binance_price_source import (
     BinancePriceSource,
-    BinancePriceSourceError,
     parse_klines,
 )
 from polywatch.infrastructure.prices.polymarket_price_source import (
     PolymarketPriceSource,
-    PolymarketPriceSourceError,
     parse_crypto_price_payload,
 )
 
@@ -83,11 +81,12 @@ async def test_polymarket_window_lama_dilewati_tanpa_request() -> None:
 
 @respx.mock
 async def test_polymarket_gagal_setelah_retry_habis() -> None:
+    """T-030/ADR-017: kegagalan permanen mengembalikan None (bukan raise)
+    supaya use case bisa lanjut ke sumber cadangan / sentinel unavailable."""
     respx.get(f"{POLY}/api/crypto/crypto-price").mock(return_value=httpx.Response(503))
     source = PolymarketPriceSource(POLY)
 
-    with pytest.raises(PolymarketPriceSourceError):
-        await source.open_close(FRESH_SLUG)
+    assert await source.open_close(FRESH_SLUG) is None
 
 
 @respx.mock
@@ -112,6 +111,10 @@ async def test_binance_open_close_sukses() -> None:
 @respx.mock
 async def test_binance_kosong_mengembalikan_none() -> None:
     respx.get(f"{BINANCE}/api/v3/klines").mock(return_value=httpx.Response(200, json=[]))
+    # T-030: mirror juga kosong — hasil tetap None.
+    respx.get("https://data-api.binance.vision/api/v3/klines").mock(
+        return_value=httpx.Response(200, json=[])
+    )
     source = BinancePriceSource(BINANCE)
 
     assert await source.open_close("btc-updown-5m-1794110400") is None
@@ -119,11 +122,42 @@ async def test_binance_kosong_mengembalikan_none() -> None:
 
 @respx.mock
 async def test_binance_gagal_setelah_retry_habis() -> None:
+    """T-030/ADR-017: gagal di host utama → coba mirror publik; gagal
+    semuanya → None (bukan raise) supaya use case bisa fallback."""
     respx.get(f"{BINANCE}/api/v3/klines").mock(return_value=httpx.Response(429))
+    mirror = respx.get("https://data-api.binance.vision/api/v3/klines").mock(
+        return_value=httpx.Response(200, json=[])
+    )
     source = BinancePriceSource(BINANCE)
 
-    with pytest.raises(BinancePriceSourceError):
-        await source.open_close("btc-updown-5m-1794110400")
+    assert await source.open_close("btc-updown-5m-1794110400") is None
+    assert mirror.called  # mirror benar-benar dicoba sebagai upaya terakhir
+
+
+@respx.mock
+async def test_binance_host_utama_gagal_mirror_berhasil() -> None:
+    """T-030/ADR-017: host utama 429 → mirror mengembalikan klines → dipakai."""
+    klines = [
+        [1, "100.5", "101", "100", "100.9", 10],
+        [2, "100.9", "102", "100.8", "101.7", 5],
+    ]
+    respx.get(f"{BINANCE}/api/v3/klines").mock(return_value=httpx.Response(429))
+    respx.get("https://data-api.binance.vision/api/v3/klines").mock(
+        return_value=httpx.Response(200, json=klines)
+    )
+    source = BinancePriceSource(BINANCE)
+
+    pair = await source.open_close("btc-updown-5m-1794110400")
+
+    assert pair == (Decimal("100.5"), Decimal("101.7"))
+
+
+@respx.mock
+async def test_binance_aset_tidak_diperdagangkan_langsung_none() -> None:
+    """xau/xag tidak ada pair di Binance — None tanpa request sia-sia."""
+    source = BinancePriceSource(BINANCE)
+
+    assert await source.open_close("xau-updown-15m-1794110400") is None
 
 
 def test_slug_tidak_valid_ditolak_minta_harga() -> None:

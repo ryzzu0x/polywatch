@@ -78,12 +78,21 @@ class ComponentHealth:
 
 @dataclass(frozen=True, slots=True)
 class HealthReport:
-    """Hasil satu pemeriksaan kesehatan (untuk log/test)."""
+    """Hasil satu pemeriksaan kesehatan (untuk log/test).
+
+    T-030/BUG-014: `stale_names` berisi hanya komponen yang BARU menjadi
+    stale atau yang cooldown log-nya (10 menit) sudah lewat — dipakai
+    runner untuk log `health_stale_detected`. `components` tetap berisi
+    status penuh semua komponen.
+    """
 
     components: tuple[ComponentHealth, ...]
+    _logged_stale: tuple[str, ...] | None = None
 
     @property
     def stale_names(self) -> tuple[str, ...]:
+        if self._logged_stale is not None:
+            return self._logged_stale
         return tuple(c.name for c in self.components if c.stale)
 
 
@@ -95,6 +104,8 @@ class _State:
     stale: bool = False
     notified: bool = False
     last_notified_at: datetime | None = None
+    #: T-030/BUG-014: log WARNING stale terakhir per komponen (rate-limit log).
+    last_stale_log_at: datetime | None = None
 
 
 def _fmt(moment: datetime | None) -> str:
@@ -234,6 +245,10 @@ class HealthMonitor:
         siklus WS aktif, ADR-014). Keberhasilan meng-update `last_ok`;
         kegagalan tidak — penilaian stale tetap lewat `check()`.
 
+        T-030/BUG-014: pemulihan dikirim maksimal SEKALI per episode stale
+        — pemanggil memakai `ok=False` untuk kegagalan; pelaporan sukses
+        ulang setelah pemulihan tidak mengirim apa pun.
+
         T-029: `duration_s` (detik) dipakai untuk ambang adaptif — siklus
         yang wajar lebih panjang dari floor tidak lagi memicu alarm palsu.
         """
@@ -243,11 +258,12 @@ class HealthMonitor:
         if not ok:
             return
         now = self._clock.now()
-        state.last_ok = now
         was_notified = state.notified
+        state.last_ok = now
         state.stale = False
         state.notified = False
         state.last_notified_at = None
+        state.last_stale_log_at = None
         if was_notified:
             await self._send(_recovery_text(kind, now), "health_recovered")
         self._persist_notification_state(kind)
@@ -263,6 +279,7 @@ class HealthMonitor:
                 "bacaan aktivitas health gagal", extra={"event": "health_activity_error"}
             )
         report: list[ComponentHealth] = []
+        logged: list[str] = []
         for name in _COMPONENTS:
             last = self._state[name].last_ok
             stale_sec = self.effective_stale_s(name)
@@ -271,16 +288,28 @@ class HealthMonitor:
                 # jangan alarm; heartbeat tetap dicatat.
                 state = self._state[name]
                 if state.notified:
+                    # T-030: pemulihan notifikasi hanya dikirim SEKALI per
+                    # episode stale (BUG-014: live_markets fluktuatif per cek
+                    # tidak boleh mengirim pesan pemulihan berulang).
+                    state.notified = False
                     await self._send(_recovery_text(name, last or now), "health_recovered")
                 state.stale = False
                 state.notified = False
-                state.last_notified_at = None
+                state.last_stale_log_at = None
+                # last_notified_at TIDAK di-reset: market live kembali muncul
+                # dalam cooldown (BUG-013/BUG-014 flapping 0↔N) tidak boleh
+                # mengirim alarm baru setiap 30 dtk.
                 report.append(ComponentHealth(name, False, False, last))
                 continue
             await self._evaluate(name, last, stale_sec, now, live_markets)
             state = self._state[name]
             report.append(ComponentHealth(name, state.stale, state.notified, last))
-        return HealthReport(tuple(report))
+            # T-030/BUG-014: log stale hanya saat transisi / cooldown lewat,
+            # bukan setiap cek (sebelumnya ±2 baris/menit → 1.137 baris/9,5 jam).
+            if state.stale and self._should_log_stale(name):
+                self._mark_stale_logged(name)
+                logged.append(name)
+        return HealthReport(tuple(report), tuple(logged))
 
     async def _evaluate(
         self,
@@ -305,9 +334,14 @@ class HealthMonitor:
             state.stale = False
             state.notified = False
             state.last_notified_at = None
+            state.last_stale_log_at = None
             return
 
         state.stale = True
+        # BUG-014/T-030: cooldown per komponen dari `last_notified_at` —
+        # termasuk nilai yang dimuat ulang dari state persisten saat
+        # restart (lihat _restore_notification_state), jadi rate limit
+        # tetap patuh lintas restart (maks 1 notifikasi / 10 menit).
         cooldown_ok = (
             state.last_notified_at is None
             or (now - state.last_notified_at).total_seconds() >= self._rate_limit_s
@@ -321,6 +355,23 @@ class HealthMonitor:
             state.notified = True
             state.last_notified_at = now
         self._persist_notification_state(name)
+
+    def _should_log_stale(self, name: str) -> bool:
+        """Rate-limit log WARNING stale per komponen (BUG-014/T-030).
+
+        Deteksi stale tetap dievaluasi tiap cek, tetapi log WARNING hanya
+        saat transisi baru ke stale atau sekali per `rate_limit_s` (10
+        menit default) supaya journald tidak banjir 2 baris/menit saat
+        gangguan berjam-jam. Return True juga menandai waktu log.
+        """
+        state = self._state[name]
+        now = self._clock.now()
+        if not state.stale or state.last_stale_log_at is None:
+            return True
+        return (now - state.last_stale_log_at).total_seconds() >= self._rate_limit_s
+
+    def _mark_stale_logged(self, name: str) -> None:
+        self._state[name].last_stale_log_at = self._clock.now()
 
     async def _send(self, text: str, event: str) -> None:
         """Kirim lewat port Notifier; kegagalan kirim tidak boleh melempar."""

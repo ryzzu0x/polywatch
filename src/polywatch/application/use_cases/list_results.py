@@ -48,8 +48,12 @@ class ListResults:
         lines = [f"Hasil {asset.upper()} {timeframe.value} (terbaru dulu):"]
         for i, row in enumerate(rows, start=1):
             hasil = "Up" if row.result.value == "up" else "Down"
+            # T-030/ADR-017: harga open/close bisa NULL (price_source
+            # 'unavailable' saat semua sumber harga gagal).
+            open_txt = row.open_price if row.open_price is not None else "-"
+            close_txt = row.close_price if row.close_price is not None else "-"
             lines.append(
-                f"{i}. open {row.open_price} -> close {row.close_price} | {hasil} "
+                f"{i}. open {open_txt} -> close {close_txt} | {hasil} "
                 f"| vol {row.volume_usdc} | {row.start_at:%Y-%m-%d %H:%M} UTC"
             )
         return "\n".join(lines)

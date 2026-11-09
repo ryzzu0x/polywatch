@@ -71,10 +71,58 @@ OnSavedCallback = Callable[[Sequence[Trade]], Awaitable[None]]
 #: kesegaran ingest di HealthMonitor, bukan trade market LIVE.
 OnHeartbeatCallback = Callable[[bool], Awaitable[None]]
 
+#: T-030/ADR-017: event mentah dari stream (frame apa pun) — dipakai
+#: watchdog untuk membedakan "stream hidup dan bicara" vs "hidup tapi
+#: bisu". Implementasi adapter nyata mengembalikan acakan token yang
+#: berubah tiap event; kelas ini hanya penanda protokol.
+StreamRawEvent = object
+
+
+class _Watchdog:
+    """Pelacak event terakhir + timer paksa-reconnect (T-030/ADR-017).
+
+    Stream "hidup tapi bisu" (BUG-013): koneksi WS terbuka, recv() tidak
+    pernah timeout, tapi tidak ada event datang — token jendela lama. Lalu
+    internal `asyncio.wait_for` memberi batas waktu berjalan stream tanpa
+    event; bila habis, pemanggil me-restart koneksi dengan token terbaru.
+    """
+
+    def __init__(self, timeout_sec: float) -> None:
+        self.timeout_sec = timeout_sec
+        self.last_event_monotonic: float | None = None
+        self.live_markets = 0
+        self.forced = 0
+
+    def mark_event(self) -> None:
+        self.last_event_monotonic = asyncio.get_running_loop().time()
+
+    def arm(self) -> None:
+        """Mulai/jaw ulang penghitungan dari sekarang (stream baru dibuka)."""
+        self.last_event_monotonic = asyncio.get_running_loop().time()
+
+    def should_force(self, has_tokens: bool) -> bool:
+        """True bila tidak ada event dalam `timeout_sec` padahal ada token."""
+        if not has_tokens or self.timeout_sec <= 0:
+            return False
+        if self.last_event_monotonic is None:
+            return False  # belum pernah dibuka — biarkan stream mulai
+        elapsed = asyncio.get_running_loop().time() - self.last_event_monotonic
+        return elapsed >= self.timeout_sec
+
+
 DEFAULT_MAX_CACHE_TX = 10_000
 
 #: Interval refresh token market live untuk stream kontinyu (T-026).
 DEFAULT_LIVE_REFRESH_SEC = 30.0
+
+#: T-030/ADR-017: watchdog — bila TIDAK ada event WS sama sekali selama
+#: N detik padahal ada market live (stream hidup tapi bisu), paksa
+#: reconnect + resubscribe. Koneksi "hidup tapi bisu" (BUG-013) tidak
+#: memicu reconnect otomatis klien WS karena recv() tidak timeout.
+DEFAULT_WATCHDOG_SEC = 180.0
+
+#: T-030/ADR-017: interval log heartbeat ingest (audit dari journald).
+DEFAULT_HEARTBEAT_LOG_SEC = 60.0
 
 
 @dataclass(slots=True)
@@ -107,6 +155,8 @@ class IngestTrades:
         sleep: Callable[[float], Awaitable[None]] | None = None,
         on_batch_commit: Callable[[], Awaitable[None]] | None = None,
         on_heartbeat: OnHeartbeatCallback | None = None,
+        watchdog_sec: float = DEFAULT_WATCHDOG_SEC,
+        heartbeat_log_sec: float = DEFAULT_HEARTBEAT_LOG_SEC,
     ) -> None:
         self._stream = stream
         self._receipts = receipts
@@ -122,8 +172,15 @@ class IngestTrades:
         self._sleep = sleep or asyncio.sleep
         self._on_batch_commit = on_batch_commit
         self._on_heartbeat = on_heartbeat
+        self._watchdog_sec = watchdog_sec
+        self._heartbeat_log_sec = heartbeat_log_sec
         self._seen_tx: set[str] = set()
         self._last_event_beat = 0.0
+        self._watchdog = _Watchdog(watchdog_sec)
+        # statistik kumulatif untuk log heartbeat (T-030)
+        self._total_events = 0
+        self._total_saved = 0
+        self._last_event_ts: float | None = None  # epoch clock
 
     async def _heartbeat(self, ok: bool = True) -> None:
         """Laporkan aktivitas ingest ke health monitor (T-027).
@@ -152,13 +209,20 @@ class IngestTrades:
         await self._heartbeat(ok=True)
 
     async def run(self, stop_event: asyncio.Event | None = None) -> None:
-        """Loop ingest kontinyu (T-026): langganan WS hidup seumur proses.
+        """Loop ingest kontinyu (T-026) + watchdog & heartbeat log (T-030).
 
         - Refresh token market live dari `live_tokens` tiap
           `live_refresh_sec` (dan segera saat stream berakhir — market
           selesai menutup koneksi WS dengan close 1000).
-        - Stream direstart dengan token terbaru; cache dedupe
-          dipertahankan lintas restart (idempoten tetap dijaga DB).
+        - Bila set token BERUBAH, stream lama dibatalkan dan koneksi baru
+          dibuka dengan token terbaru (re-subscribe paksa — BUG-013: refresh
+          token sebelumnya tidak pernah mengganti token stream yang hidup).
+        - Watchdog (T-030/ADR-017): tidak ada event WS dalam `watchdog_sec`
+          padahal ada token live → batalkan stream + buka koneksi baru,
+          log `ws_watchdog_reconnect`.
+        - Log heartbeat ingest tiap `heartbeat_log_sec` berisi `tokens`,
+          `live_markets`, `events_seen`, `trades_saved`, `last_event_age_s`
+          — status ingest bisa diaudit dari journald.
         - `stop_event` (opsional) mengakhiri loop untuk shutdown rapi.
         """
         if stop_event is None:
@@ -180,8 +244,12 @@ class IngestTrades:
                 return previous
 
         current = await _refresh_tokens(list(self._token_markets))
+        stats = IngestStats()
+        last_hb_log = 0.0
+        last_refresh_mono = asyncio.get_running_loop().time()
         while not stop_event.is_set():
             token_map = _token_map(current)
+            self._watchdog.live_markets = len(current)
             if token_map:
                 logger.info(
                     "mulai ingest ws",
@@ -192,21 +260,48 @@ class IngestTrades:
                 # stream kontinyu bisa hidup berjam-jam tanpa pernah
                 # "berakhir", jadi siklus-hidup itu sendiri adalah aktivitas.
                 await self._heartbeat(ok=True)
+                self._watchdog.arm()
+                stream_task = asyncio.ensure_future(self._drain_stream(token_map, stats))
                 try:
-                    async for event in self._stream.stream(list(token_map)):
-                        stats.events_seen += 1
-                        # Heartbeat per event WS diterima (rate-limited
-                        # internal supaya tidak membanjiri monitor).
-                        await self._heartbeat_event()
-                        if event.tx_hash in self._seen_tx:
-                            stats.tx_deduped += 1
-                            continue
-                        self._seen_tx.add(event.tx_hash)
-                        if len(self._seen_tx) > self._max_cache_tx:
-                            keep = sorted(self._seen_tx)[len(self._seen_tx) // 2 :]
-                            self._seen_tx = set(keep)
-                        received_at = self._clock.now().timestamp()
-                        await self._process_tx(event.tx_hash, token_map, stats, received_at)
+                    while not stream_task.done() and not stop_event.is_set():
+                        # tunggu dengan batas supaya watchdog/heartbeat log/
+                        # refresh token tetap dievaluasi meski stream diam.
+                        with contextlib.suppress(asyncio.TimeoutError):
+                            await asyncio.wait_for(asyncio.shield(stream_task), timeout=1.0)
+                        if self._watchdog.should_force(bool(token_map)):
+                            self._watchdog.forced += 1
+                            logger.warning(
+                                "watchdog ingest: tidak ada event WS; paksa reconnect",
+                                extra={
+                                    "event": "ws_watchdog_reconnect",
+                                    "no_event_s": round(self._watchdog.timeout_sec),
+                                    "tokens": len(token_map),
+                                    "forced": self._watchdog.forced,
+                                },
+                            )
+                            stream_task.cancel()
+                            await self._heartbeat(ok=False)
+                            break
+                        now_mono = asyncio.get_running_loop().time()
+                        if now_mono - last_hb_log >= max(self._heartbeat_log_sec, 1.0):
+                            last_hb_log = now_mono
+                            self._log_ingest_heartbeat(len(token_map))
+                        # BUG-013: refresh token juga saat stream masih hidup
+                        # — market 5m berganti tiap 5 menit, jendela close-1000
+                        # tidak selalu datang. Token berubah → stream dibuka
+                        # ulang dengan token terbaru (re-subscribe paksa).
+                        if now_mono - last_refresh_mono >= max(self._live_refresh_sec, 0.0):
+                            last_refresh_mono = now_mono
+                            new_tokens = await _refresh_tokens(current)
+                            if new_tokens != current:
+                                self._log_resubscribe(current, new_tokens)
+                                current = new_tokens
+                                stream_task.cancel()
+                                break
+                    if not stream_task.done():
+                        stream_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await stream_task
                 except Exception:
                     logger.exception(
                         "stream ingest gagal; restart dengan token terbaru",
@@ -233,7 +328,66 @@ class IngestTrades:
             # lalu refresh token market live.
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop_event.wait(), timeout=self._live_refresh_sec)
-            current = await _refresh_tokens(current)
+            last_refresh_mono = asyncio.get_running_loop().time()
+            new_tokens = await _refresh_tokens(current)
+            if new_tokens != current:
+                self._log_resubscribe(current, new_tokens)
+            current = new_tokens
+
+    def _log_resubscribe(
+        self, old: Sequence[TokenMarketInfo], new: Sequence[TokenMarketInfo]
+    ) -> None:
+        logger.info(
+            "token live berubah; re-subscribe",
+            extra={
+                "event": "ingest_resubscribe",
+                "markets": len(new),
+                "tokens": len(_token_map(new)),
+                "changed": abs(len(new) - len(old)),
+            },
+        )
+
+    async def _drain_stream(
+        self, token_map: dict[str, TokenMarketInfo], stats: IngestStats
+    ) -> None:
+        """Konsumsi stream sampai berakhir (atau dibatalkan watchdog/runner)."""
+        async for event in self._stream.stream(list(token_map)):
+            stats.events_seen += 1
+            self._total_events += 1
+            self._watchdog.mark_event()
+            self._last_event_ts = self._clock.now().timestamp()
+            # Heartbeat per event WS diterima (rate-limited internal
+            # supaya tidak membanjiri monitor).
+            await self._heartbeat_event()
+            if event.tx_hash in self._seen_tx:
+                stats.tx_deduped += 1
+                continue
+            self._seen_tx.add(event.tx_hash)
+            if len(self._seen_tx) > self._max_cache_tx:
+                keep = sorted(self._seen_tx)[len(self._seen_tx) // 2 :]
+                self._seen_tx = set(keep)
+            received_at = self._clock.now().timestamp()
+            await self._process_tx(event.tx_hash, token_map, stats, received_at)
+
+    def _log_ingest_heartbeat(self, tokens: int) -> None:
+        """Log heartbeat ingest terstruktur tiap 60 dtk (T-030/ADR-017)."""
+        last_age: float | str
+        if self._last_event_ts is None:
+            last_age = "n/a"
+        else:
+            last_age = round(self._clock.now().timestamp() - self._last_event_ts, 1)
+        logger.info(
+            "heartbeat ingest",
+            extra={
+                "event": "ingest_heartbeat",
+                "tokens": tokens,
+                "live_markets": self._watchdog.live_markets,
+                "events_seen": self._total_events,
+                "trades_saved": self._total_saved,
+                "last_event_age_s": last_age,
+                "watchdog_forced": self._watchdog.forced,
+            },
+        )
 
     async def run_once(self) -> IngestStats:
         """Satu siklus: proses event dari token saat ini sampai stream berakhir.
@@ -289,6 +443,7 @@ class IngestTrades:
             return
         saved = await self._trades.insert_many(trades)
         stats.trades_saved += saved
+        self._total_saved += saved
         stats.latency_ms.append((now.timestamp() - received_at) * 1000)
         if saved > 0:
             if self._on_batch_commit is not None:
